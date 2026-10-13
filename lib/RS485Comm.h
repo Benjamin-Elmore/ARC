@@ -2,6 +2,7 @@
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_timer.h"
 
 // UART CONFIGURATIONS
 #define RS485_COMM_UART UART_NUM_1
@@ -31,6 +32,8 @@
 #define BINARY_COMM_RESET_CONT      0b111110    // CONTINUE RESET
 #define BINARY_COMM_RESET_END       0b101010    // END RESET
 #define BINARY_COMM_REBOOT          0b010101    // REBOOT ARSENAL
+
+#define SENSOR_ID_SECTION_LENGTH    8           // LENGTH OF SENSOR ID PACKET
 
 class RS485Comm{
 public:
@@ -96,13 +99,18 @@ private:
     // + 3 due to the header and length bytes
     uint8_t _packet[DEFAULT_MAX_PAYLOAD + 3]{};
     uint16_t _packetLength{};
+    uint32_t _timeSinceLastReceive{};
+    uint32_t _timeOfSending{};
 
     void parseByte(uint8_t byte) {
         // Parses the bytes sent through from the RTOS read task and formulates
         // them into a packet if they have the header, the correct length, data, and
         // the checksum
 
-        // HEADER (1 byte, 8 bits)
+        // The currentBit will not kick off the rest of the read unless we get the header
+        // byte
+
+        // HEADER (pos 0, 1 byte, 8 bits)
         if (this->_currentBit == 0) {
 
             // Compare a Bitwise AND comparison on the 6 bits on the left
@@ -110,14 +118,14 @@ private:
             // Lshift twice for the comparison.
             // If we are reading, move the packet over
 
-            if ((byte >> 2) & BINARY_COMM_READ) {
+            if ((byte >> 2) == BINARY_COMM_READ) {
                 this->_packet[_currentBit] = byte;
 
                 _currentBit++; // Next _currentBit
                 return; // This bit is done
             }
         }
-        // LENGTH (2 bytes, 16 bits)
+        // LENGTH (pos 1-2, 2 bytes, 16 bits)
         else if (_currentBit == 1 || _currentBit == 2) {
             // These are length values, so we will add them if we're on it
 
@@ -125,7 +133,7 @@ private:
                 // Check if the combined 16 bits of length are larger than the allowed payload
 
                 uint16_t length =
-                    static_cast<uint16_t>(this->_packet[1] << 8) &
+                    static_cast<uint16_t>(this->_packet[1] << 8) |
                     static_cast<uint16_t>(byte);
 
                 if (length > DEFAULT_MAX_PAYLOAD) {
@@ -141,9 +149,47 @@ private:
 
             this->_packet[_currentBit] = byte;
             _currentBit++;
-            return;
         }
-        //TODO: ADD DATA PACKET PROCESSING
+        // TIME SINCE LAST RECEIVE (pos 3-6, 4 bytes, 32 bits)
+        else if (_currentBit >= 3 && _currentBit <= 6) {
+
+            this->_packet[_currentBit] = byte;
+
+            // Last Bit of the time
+            if (_currentBit == 6){
+                uint32_t timeSinceLast = 
+                    ((uint32_t)_packet[3] << 24) |
+                    ((uint32_t)_packet[4] << 16) |
+                    ((uint32_t)_packet[5] << 8) |
+                    ((uint32_t)_packet[6]);
+
+                this->_timeSinceLastReceive = timeSinceLast;
+            }
+
+            _currentBit++;
+        }
+        // TIME OF SEND (pos 3-6, 4 bytes, 32 bits)
+        else if (_currentBit >= 7 && _currentBit <= 10) {
+
+            this->_packet[_currentBit] = byte;
+
+            // Last Bit of the time
+            if (_currentBit == 10){
+                uint32_t timeOfSending = 
+                    ((uint32_t)_packet[7] << 24) |
+                    ((uint32_t)_packet[8] << 16) |
+                    ((uint32_t)_packet[9] << 8) |
+                    ((uint32_t)_packet[10]);
+
+                this->_timeOfSending = timeOfSending;
+            }
+
+            _currentBit++;
+        }
+        // SensorID's (pos 11-16, 8 bytes, 64 bits)
+        else if (_currentBit >= 11 && _currentBit <= 16) {
+            
+        }
     }
 
     void getBytesLoop() {
@@ -160,7 +206,7 @@ private:
             if (received > 0) {
                 // UART read bytes, and we will parse them and send the requested data
                 for (int i = 0; i < received; i++) {
-                    this->parseByte(rxBuffer[i]);
+                    this->parseByte(this->_lastReadBytes[i]);
                 }
             }
         }
