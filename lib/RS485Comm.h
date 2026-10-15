@@ -24,6 +24,7 @@
 #define DEFAULT_COMM_TASK_CORE          1
 #define DEFAULT_COMM_RX_BUFF            128
 #define DEFAULT_MAX_PAYLOAD             128
+#define DEFAULT_MAX_LENGTH              121
 
 // BINARY HEADERS
 #define BINARY_COMM_READ            0b100000    // READING DATA
@@ -32,8 +33,17 @@
 #define BINARY_COMM_RESET_CONT      0b111110    // CONTINUE RESET
 #define BINARY_COMM_RESET_END       0b101010    // END RESET
 #define BINARY_COMM_REBOOT          0b010101    // REBOOT ARSENAL
+#define BINARY_ESCAPE_SEQUENCE      0xDEADBEEF  // ESCAPE SEQUENCE
 
-#define SENSOR_ID_SECTION_LENGTH    8           // LENGTH OF SENSOR ID PACKET
+#define SENSOR_TIME_SECTION_LENGTH_SUM      4           // LENGTH OF TWO TIME SECTIONS
+#define SENSOR_ID_SECTION_LENGTH            8           // LENGTH OF SENSOR ID PACKET
+
+enum ParseState {
+    WAITING_FOR_HEADER,
+    LENGTH,
+    BODY,
+    CHECKSUM
+};
 
 class RS485Comm{
 public:
@@ -86,129 +96,236 @@ public:
     bool checkCommStatus(){ return (this->_status == ESP_OK); }
 
 private:
+    // CORE FIELDS
     esp_err_t _status{ESP_ERR_NOT_FINISHED};
     TaskHandle_t _taskObject = nullptr;
-
     const char* _name{DEFAULT_COMM_NAME};
     const uint8_t _priority{DEFAULT_COMM_PRIORITY};
     const uint8_t _core{DEFAULT_COMM_TASK_CORE};
 
-    size_t _currentPacketIndex{};
+    // READ BUFFER
     uint8_t _lastReadBytes[DEFAULT_COMM_RX_BUFF]{};
 
     // + 3 due to the header and length bytes
-    uint8_t _packet[DEFAULT_MAX_PAYLOAD + 3]{};
+    uint8_t _packet[DEFAULT_MAX_PAYLOAD]{};
     uint8_t _sensorIDS[SENSOR_ID_SECTION_LENGTH]{};
-    uint8_t _currentSensorIDIdx{};
 
+    // PACKET PARSING STATES, reset with resetParsing()
+    bool _isFirstRead{true};
+    ParseState _currentPacketState{ParseState::WAITING_FOR_HEADER};
+    size_t _currentPacketIndex{};
+    uint16_t _dataLastIndex{};
+
+    // PACKET DATA, persistent for a complete packet
     uint16_t _packetLength{};
     uint32_t _timeSinceLastReceive{};
     uint32_t _timeOfSending{};
+    uint8_t _currentSensorIDIndex{};
 
-    void parseByte(uint8_t byte) {
-        // Parses the bytes sent through from the RTOS read task and formulates
-        // them into a packet if they have the header, the correct length, data, and
-        // the checksum
+    //TODO: Add checksum validation for the packet
+    // bool validateChecksum(){}
 
-        // The currentBit will not kick off the rest of the read unless we get the header
-        // byte
+    void resetParsing(){
+        _currentPacketIndex = 0;
+        _currentPacketState = ParseState::WAITING_FOR_HEADER;
+        _dataLastIndex = 0;
+    }
 
-        // HEADER (pos 0, 1 byte, 8 bits)
-        if (this->_currentPacketIndex == 0) {
-
-            // Compare a Bitwise AND comparison on the 6 bits on the left
-            // to determine what we are working with
-            // Lshift twice for the comparison.
-            // If we are reading, move the packet over
-
+    void parseByte(uint8_t byte){
+        switch (_currentPacketState)
+        {
+        case ParseState::WAITING_FOR_HEADER:
             if ((byte >> 2) == BINARY_COMM_READ) {
                 this->_packet[_currentPacketIndex] = byte;
 
-                this->_currentPacketIndex++; // Next _currentPacketIndex
+                this->_currentPacketIndex = 1; // Next _currentPacketIndex
+                _currentPacketState = ParseState::LENGTH;
                 return; // This bit is done
             }
-        }
-        // LENGTH (pos 1-2, 2 bytes, 16 bits)
-        else if (_currentPacketIndex == 1 || _currentPacketIndex == 2) {
-            // These are length values, so we will add them if we're on it
-
-            if (_currentPacketIndex == 2) {
-                // Check if the combined 16 bits of length are larger than the allowed payload
-
-                uint16_t length =
+            break;
+        
+        case ParseState::LENGTH:
+            if (_currentPacketIndex == 2){
+                // Compare our byte with the
+                this->_packetLength =
                     static_cast<uint16_t>(this->_packet[1] << 8) |
                     static_cast<uint16_t>(byte);
 
-                if (length > DEFAULT_MAX_PAYLOAD) {
+                if (this->_packetLength > DEFAULT_MAX_LENGTH) {
                     //Reset the values if the length is too long. There is something wrong
-                    this->_currentPacketIndex = 0;
+                    this->resetParsing();
                     return;
                 } else {
                     // This is the correct length for the packet,
                     // save for later
-                    this->_packetLength = length;
+                    this->_packetLength = this->_packetLength;
+
+                    // This is the last index of the data packet. This is the top bound
+                    this->_dataLastIndex = 3 + this->_packetLength - SENSOR_TIME_SECTION_LENGTH_SUM;
+
+                    //Change the state to the body
+                    this->_currentPacketState = ParseState::BODY;
                 }
             }
+            
+            // Add the byte
+            this->_packet[_currentPacketIndex++] = byte;
 
+            break;
+        
+        case ParseState::BODY:
+            // Check if we are still within the index
             this->_packet[_currentPacketIndex] = byte;
-            this->_currentPacketIndex++;
-        }
-        // TIME SINCE LAST RECEIVE (pos 3-6, 4 bytes, 32 bits)
-        else if (_currentPacketIndex >= 3 && _currentPacketIndex <= 6) {
-
-            this->_packet[_currentPacketIndex] = byte;
-
-            // Last Bit of the time
-            if (_currentPacketIndex == 6){
-                uint32_t timeSinceLast = 
-                    ((uint32_t)_packet[3] << 24) |
-                    ((uint32_t)_packet[4] << 16) |
-                    ((uint32_t)_packet[5] << 8) |
-                    ((uint32_t)_packet[6]);
-
-                this->_timeSinceLastReceive = timeSinceLast;
+            if (_currentPacketIndex >= (this->_dataLastIndex)) {
+                // This is the last bit, move on to the next part of the packet
+                this->_currentPacketState = ParseState::CHECKSUM;
             }
 
-            this->_currentPacketIndex++;
-        }
-        // TIME OF SEND (pos 3-6, 4 bytes, 32 bits)
-        else if (_currentPacketIndex >= 7 && _currentPacketIndex <= 10) {
-
+            _currentPacketIndex++;
+            // Add the last value
+            break;
+        
+        case ParseState::CHECKSUM:
+            // Get the 4 bits for the checksum
             this->_packet[_currentPacketIndex] = byte;
-
-            // Last Bit of the time
-            if (_currentPacketIndex == 10){
-                uint32_t timeOfSending = 
-                    ((uint32_t)_packet[7] << 24) |
-                    ((uint32_t)_packet[8] << 16) |
-                    ((uint32_t)_packet[9] << 8) |
-                    ((uint32_t)_packet[10]);
-
-                this->_timeOfSending = timeOfSending;
+            if (_currentPacketIndex == _dataLastIndex + 4) {
+                // We are on the last checksum value
+                // We will use the packet to validate the checksum
+                // if (this->validateChecksum()) {
+                //     //TODO: Add an implementation for extract data
+                //     //TODO: Once implemented, uncomment
+                //     // this->extractData();
+                // }
+                this->resetParsing();
             }
 
-            this->_currentPacketIndex++;
-        }
-        // SENSOR IDS (pos 11-16, 8 bytes, 64 bits)
-        // NOTE: Two Senor IDs in one byte
-        else if (_currentPacketIndex >= 11 && _currentPacketIndex <= 16) {
-            this->_packet[_currentPacketIndex] = byte;
+            // Increment the index
+            _currentPacketIndex++;
 
-            if (byte != 0){
-                // We have a byte that contains sensor ID's
-                uint8_t firstID = (byte >> 4);
-
-                // Take the byte and mask only the first 4 bits
-                // Use bitwise AND to get only the first 4
-                uint8_t secondID = (byte & 0x0F);
-
-                // Put each piece in the sensorIDs
-                this->_sensorIDS[_currentSensorIDIdx++] = firstID;
-                this->_sensorIDS[_currentSensorIDIdx++] = secondID;
-            }
-            this->_currentPacketIndex++;
+            break;
+        default:
+            break;
         }
     }
+
+    // void parseDataSet(uint8_t byte) {
+    //     // Parses the bytes sent through from the RTOS read task and formulates
+    //     // them into a packet if they have the header, the correct length, data, and
+    //     // the checksum
+
+    //     // The currentBit will not kick off the rest of the read unless we get the header
+    //     // byte
+
+    //     // HEADER (pos 0, 1 byte, 8 bits)
+    //     if (this->_currentPacketIndex == 0) {
+
+    //         // Compare a Bitwise AND comparison on the 6 bits on the left
+    //         // to determine what we are working with
+    //         // Lshift twice for the comparison.
+    //         // If we are reading, move the packet over
+
+    //         if ((byte >> 2) == BINARY_COMM_READ) {
+    //             this->_packet[_currentPacketIndex] = byte;
+
+    //             this->_currentPacketIndex++; // Next _currentPacketIndex
+    //             return; // This bit is done
+    //         }
+    //     }
+    //     // LENGTH (pos 1-2, 2 bytes, 16 bits)
+    //     else if (_currentPacketIndex == 1 || _currentPacketIndex == 2) {
+    //         // These are length values, so we will add them if we're on it
+
+    //         if (_currentPacketIndex == 2) {
+    //             // Check if the combined 16 bits of length are larger than the allowed payload
+
+    //             uint16_t length =
+    //                 static_cast<uint16_t>(this->_packet[1] << 8) |
+    //                 static_cast<uint16_t>(byte);
+
+    //             if (length > DEFAULT_MAX_PAYLOAD) {
+    //                 //Reset the values if the length is too long. There is something wrong
+    //                 this->_currentPacketIndex = 0;
+    //                 return;
+    //             } else {
+    //                 // This is the correct length for the packet,
+    //                 // save for later
+    //                 this->_packetLength = length;
+
+    //                 // This is the last index of the data packet. This is the top bound
+    //                 this->_dataLastIndex = 17 + length - SENSOR_TIME_SECTION_LENGTH_SUM;
+    //             }
+    //         }
+
+    //         this->_packet[_currentPacketIndex++] = byte;
+    //     }
+    //     // TIME SINCE LAST RECEIVE (pos 3-6, 4 bytes, 32 bits)
+    //     else if (_currentPacketIndex <= 6) {
+    //         this->_packet[_currentPacketIndex] = byte;
+    //     }
+    //     if (_currentPacketIndex == 6){
+    //         this->_packet[_currentPacketIndex++] = byte;
+
+    //         uint32_t timeSinceLast = 
+    //             ((uint32_t)_packet[3] << 24) |
+    //             ((uint32_t)_packet[4] << 16) |
+    //             ((uint32_t)_packet[5] << 8) |
+    //             ((uint32_t)_packet[6]);
+
+    //         this->_timeSinceLastReceive = timeSinceLast;
+
+    //         // Last Bit of the time
+    //         this->_currentPacketIndex++;
+    //     }
+    //     // TIME OF SEND (pos 7-10, 4 bytes, 32 bits)
+    //     else if (_currentPacketIndex < 10) {
+
+    //         this->_packet[_currentPacketIndex++] = byte;
+
+    //         // Last Bit of the time
+
+    //         this->_currentPacketIndex++;
+    //     }
+    //     else if (_currentPacketIndex == 10){
+    //         this->_packet[_currentPacketIndex] = byte;
+
+    //         this->_timeOfSending = 
+    //             ((uint32_t)_packet[7] << 24) |
+    //             ((uint32_t)_packet[8] << 16) |
+    //             ((uint32_t)_packet[9] << 8) |
+    //             ((uint32_t)_packet[10]);
+
+    //         this->_currentPacketIndex++;
+    //     }
+    //     // SENSOR IDS (pos 11-16, 8 bytes, 64 bits)
+    //     // NOTE: Two Senor IDs in one byte
+    //     else if (_currentPacketIndex <= 16) {
+    //         this->_packet[_currentPacketIndex] = byte;
+
+    //         if (byte != 0){
+    //             // We have a byte that contains sensor ID's
+    //             uint8_t firstID = (byte >> 4);
+
+    //             // Take the byte and mask only the first 4 bits
+    //             // Use bitwise AND to get only the first 4
+    //             uint8_t secondID = (byte & 0x0F);
+
+    //             // Put each piece in the sensorIDs
+    //             this->_sensorIDS[_currentSensorIDIndex++] = firstID;
+    //             this->_sensorIDS[_currentSensorIDIndex++] = secondID;
+    //         }
+    //         this->_currentPacketIndex++;
+    //     }
+    //     else if (
+    //         this->_isFirstRead &&
+    //         _currentPacketIndex < (this->_dataLastIndex)
+    //     ) { // Is this the first packet, is this the right byte to start, is _currentSensorIDIndex at or below length
+    //         this->_packet[_currentPacketIndex++] = byte;
+    //     }
+    //     // ESCAPE SEQUENCE ()
+    //     else if (_dataLastIndex != 16 && _currentPacketIndex == (_dataLastIndex)) {
+    //         //
+    //     }
+    // }
 
     void getBytesLoop() {
         for(;;) {
