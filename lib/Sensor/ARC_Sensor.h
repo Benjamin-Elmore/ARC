@@ -18,6 +18,8 @@
 #include "OpticalPreconfig.h"
 #include "I2CBus.h"
 #include "RS485Comm.h"
+#include "RS485InterfaceSensor.h"
+#include "RS485Instance.h"
 
 // MAXIMUM VALUES PER SENSOR
 #ifndef SENSOR_MAX_FILTERS
@@ -59,7 +61,7 @@ enum SensorPreconfig {
     ENCODER
 };
 template <size_t N>
-class Sensor{
+class Sensor : RS485InterfaceSensor {
     public:
         using FunctionCallback = SensorUtils::FunctionCallback<N>;
 
@@ -69,8 +71,9 @@ class Sensor{
         // the mux exists on.
         Sensor (
                 char* name,                                                                     // NAME of the Sensor
-                I2CBus<N>& sensorCommBus,                                                       // BUS CLASS for Sensor 
+                I2CBus<N>& sensorCommBus,                                                       // BUS CLASS for Sensor
                 uint8_t deviceAddrI2C,                                                          // I2C ADDRESS
+                uint8_t deviceNumber,                                                           // DEVICE NUMBER
                 SensorPreconfig sensorType = SensorPreconfig::NONE,                             // SENSOR PRECONFIG
                 uint8_t muxChannel = SensorUtils::UNUSED_MUX,                                   // MUX CHANNEL
                 uint8_t priority = DEFAULT_PRIORITY,                                            // SENSOR TASK PRIORITY
@@ -80,7 +83,8 @@ class Sensor{
                 std::initializer_list<SensorUtils::AppendedVariable> appendedVariables = {},    // APPENDED VARIABLES
                 FunctionCallback sensorReadFunction = NULL                                      // READ FUNCTION
             )
-            : _name(name), _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority)
+            : _name(name), _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority),
+            _sensorID(deviceNumber)
         {
 
             if (sensorType != SensorPreconfig::NONE){
@@ -126,6 +130,8 @@ class Sensor{
             } else{
                 this->_status = SensorUtils::SENSOR_ERR_NO_READER;
             }
+            
+            RS485ARSENAL::addSensor(this);
         }
 
         // DESTRUCTOR:
@@ -254,9 +260,11 @@ class Sensor{
 
         uint8_t getAddressI2C() { return this->_devAddrI2C; }
 
-        std::string_view getName() { return this->_name; }
+        std::string_view getName() override { return this->_name; }
 
         uint8_t getMuxI2C() { return this->_muxChannel; }
+
+        uint8_t getID() { return this->_sensorID; }
 
         // WRAPPERS FOR I2CBus
         esp_err_t readDeviceRegister(const uint8_t regAddr, uint8_t *data, const size_t length) {
@@ -265,6 +273,13 @@ class Sensor{
         
         esp_err_t writeDeviceRegister(uint8_t regAddr, uint8_t data) {
             return this->_sensorCommBusI2C.writeRegister(this->_name, regAddr, data);
+        }
+
+        // OFFSET SETTER
+        void setOffsets(Vec3<uint16_t> o) override {
+            this->_offsets.x = o.x;
+            this->_offsets.y = o.y;
+            this->_offsets.z = o.z;
         }
 
     protected:
@@ -277,6 +292,10 @@ class Sensor{
         char* _name;
 
         FunctionCallback _readFunction = NULL;
+
+        // CRITICAL DATA:
+        Vec3<uint16_t> _offsets{};
+        uint8_t _sensorID{};
 
         //OPTIONAL MEMBERS:
         uint8_t _devAddrI2C = SensorUtils::ADDR_NOT_INCLUDED;

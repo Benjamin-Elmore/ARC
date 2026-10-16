@@ -1,6 +1,14 @@
 #pragma once
 
 namespace RS485Utils {
+
+    enum ParseState {
+        WAITING_FOR_HEADER,
+        LENGTH,
+        BODY,
+        CHECKSUM
+    };
+
     template <size_t S>
     uint32_t convertU32InArr(const uint8_t (&packet)[S], const uint8_t startingIndex){
         uint32_t converted{0};

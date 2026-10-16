@@ -1,10 +1,14 @@
 #pragma once
 
+#include <unordered_map>
+#include <string_view>
+
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "esp_timer.h"
 
 #include "RS485Utils.h"
+#include "RS485InterfaceSensor.h"
 
 // UART CONFIGURATIONS
 #define RS485_COMM_UART UART_NUM_1
@@ -46,13 +50,6 @@
 #define INDEX_TIME_SENT                     7           // TIME OF SENDING
 #define INDEX_SENSOR_IDS                    11          // SENSOR IDs
 #define INDEX_SENSOR_DATA                   19          // SENSOR_DATA
-
-enum ParseState {
-    WAITING_FOR_HEADER,
-    LENGTH,
-    BODY,
-    CHECKSUM
-};
 
 class RS485Comm{
 public:
@@ -101,6 +98,10 @@ public:
         }
     }
 
+    void addSensortoRegistry(RS485InterfaceSensor* sensor) {
+        _registryMap.emplace(sensor->getID(), sensor);
+    }
+
     // Checker for the RS485 comms
     bool checkCommStatus(){ return (this->_status == ESP_OK); }
 
@@ -112,12 +113,15 @@ private:
     const uint8_t _priority{DEFAULT_COMM_PRIORITY};
     const uint8_t _core{DEFAULT_COMM_TASK_CORE};
 
+    //Registered sensors in the instance
+    std::unordered_map<uint8_t, RS485InterfaceSensor*> _registryMap = {};
+
     // READ BUFFER
     uint8_t _lastReadBytes[DEFAULT_COMM_RX_BUFF]{};
 
     // PACKET PARSING STATES, reset with resetParsing()
     bool _isFirstRead{true};
-    ParseState _currentPacketState{ParseState::WAITING_FOR_HEADER};
+    RS485Utils::ParseState _currentPacketState{RS485Utils::ParseState::WAITING_FOR_HEADER};
     size_t _currentPacketIndex{};
     uint16_t _dataLastIndex{};
 
@@ -126,7 +130,7 @@ private:
     uint16_t _packetLength{};
     uint32_t _timeSinceLastReceive{};
     uint32_t _timeOfSending{};
-    uint8_t _sensorIDS[SENSOR_ID_SECTION_LENGTH]{};
+    uint8_t _sensorIDS[2 * SENSOR_ID_SECTION_LENGTH]{};
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs
@@ -163,7 +167,7 @@ private:
         this->calculateSensorIDs();
 
         if (this->_isFirstRead) {
-            //TODO: Add Offset Holders
+            //TODO: Add offset inputting and writing in the registry
         }
     }
 
@@ -184,24 +188,24 @@ private:
 
     void resetParsing(){
         _currentPacketIndex = 0;
-        _currentPacketState = ParseState::WAITING_FOR_HEADER;
+        _currentPacketState = RS485Utils::ParseState::WAITING_FOR_HEADER;
         _dataLastIndex = 0;
     }
 
     void parseByte(uint8_t byte){
         switch (_currentPacketState)
         {
-        case ParseState::WAITING_FOR_HEADER:
+        case RS485Utils::ParseState::WAITING_FOR_HEADER:
             if ((byte >> 2) == BINARY_COMM_READ) {
                 this->_packet[_currentPacketIndex] = byte;
 
                 this->_currentPacketIndex = 1; // Next _currentPacketIndex
-                _currentPacketState = ParseState::LENGTH;
+                _currentPacketState = RS485Utils::ParseState::LENGTH;
                 return; // This bit is done
             }
             break;
         
-        case ParseState::LENGTH:
+        case RS485Utils::ParseState::LENGTH:
             if (_currentPacketIndex == 2){
                 // Compare our byte with the
                 this->_packetLength =
@@ -221,7 +225,7 @@ private:
                     this->_dataLastIndex = 3 + this->_packetLength - SENSOR_TIME_SECTION_LENGTH_SUM;
 
                     //Change the state to the body
-                    this->_currentPacketState = ParseState::BODY;
+                    this->_currentPacketState = RS485Utils::ParseState::BODY;
                 }
             }
             
@@ -230,19 +234,19 @@ private:
 
             break;
         
-        case ParseState::BODY:
+        case RS485Utils::ParseState::BODY:
             // Check if we are still within the index
             this->_packet[_currentPacketIndex] = byte;
             if (_currentPacketIndex >= (this->_dataLastIndex)) {
                 // This is the last bit, move on to the next part of the packet
-                this->_currentPacketState = ParseState::CHECKSUM;
+                this->_currentPacketState = RS485Utils::ParseState::CHECKSUM;
             }
 
             _currentPacketIndex++;
             // Add the last value
             break;
         
-        case ParseState::CHECKSUM:
+        case RS485Utils::ParseState::CHECKSUM:
             // Get the 4 bits for the checksum
             this->_packet[_currentPacketIndex] = byte;
             if (_currentPacketIndex == _dataLastIndex + 4) {
