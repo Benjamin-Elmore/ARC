@@ -13,7 +13,7 @@
 // UART CONFIGURATIONS
 #define RS485_COMM_UART UART_NUM_1
 #ifndef UART_RTS_PIN
-#define UART_RTS_PIN    17      // TRANSMIT/RECIEVE ENABLE
+#define UART_RTS_PIN    14      // TRANSMIT/RECIEVE ENABLE
 #endif
 #ifndef UART_TX_PIN
 #define UART_TX_PIN     17      // TRANSMIT PIN
@@ -21,7 +21,7 @@
 #ifndef UART_RX_PIN
 #define UART_RX_PIN     18      // RECEIVE PIN
 #endif
-#define BAUD_RATE       11520   //BITS PER SECOND
+#define BAUD_RATE       115200  // BITS PER SECOND
 
 // COMM DEFAULT VALUES
 #define DEFAULT_COMM_PRIORITY           1
@@ -42,14 +42,21 @@
 #define BINARY_ESCAPE_SEQUENCE      0xDEADBEEF  // ESCAPE SEQUENCE
 
 // SIZE OF SECTIONS
-#define SENSOR_TIME_SECTION_LENGTH_SUM      4           // LENGTH OF TWO TIME SECTIONS
-#define SENSOR_ID_SECTION_LENGTH            8           // SENSOR ID LENGTH
+#define NON_LENGTH_BYTECOUNT                   3           // # OF BYTES BEFORE LENGTH
+#define PACKET_LENGTH_BYTECOUNT                4           // PACKET LENGTH BYTECOUNT
+#define SENSOR_TIME_SECTION_BYTECOUNT_SUM      4           // BYTECOUNT OF TWO TIME SECTIONS
+#define SENSOR_ID_SECTION_BYTECOUNT            8           // SENSOR ID BYTECOUNT
 
 // CONSISTENT FIRST INDICES PACKET SECTIONS
+#define INDEX_PACKET_LENGTH                 1           // PACKET LENGTH (Time, Time, ID, Data)
 #define INDEX_TIME_SINCE_LAST_RECEIVE       3           // TIME SINCE LAST RECEIVE
 #define INDEX_TIME_SENT                     7           // TIME OF SENDING
 #define INDEX_SENSOR_IDS                    11          // SENSOR IDs
 #define INDEX_SENSOR_DATA                   19          // SENSOR_DATA
+
+// MAX AND MIN FOR PACKET LENGTH
+#define PACKET_LENGTH_MIN           16      // MIN
+#define PACKET_LENGTH_MAX           113     // MAX
 
 class RS485Comm{
 public:
@@ -130,12 +137,12 @@ private:
     uint16_t _packetLength{};
     uint32_t _timeSinceLastReceive{};
     uint32_t _timeOfSending{};
-    uint8_t _sensorIDS[2 * SENSOR_ID_SECTION_LENGTH]{};
+    uint8_t _sensorIDS[2 * SENSOR_ID_SECTION_BYTECOUNT]{};
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs
 
-        for (int i = 0; i < SENSOR_ID_SECTION_LENGTH; i++){
+        for (int i = 0; i < SENSOR_ID_SECTION_BYTECOUNT; i++){
             // currentByte is at the first index of the ID portion + i
             uint8_t currentByte = _packet[INDEX_SENSOR_IDS + i];
 
@@ -176,14 +183,25 @@ private:
         // Checked by modulo 256 
 
         uint32_t sum{};
-        uint16_t firstChecksumByte{sizeof(_packet) / sizeof(_packet[0]) - 4};
+
+        // First checksum byte = First index for times since last + _packetLength + 4 bytes (esc sequence)
+        uint16_t firstChecksumByte{INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength + 4};
         uint32_t checksum{RS485Utils::convertU32InArr(_packet, firstChecksumByte)};
 
         // Add each item of the packet together, up to right before our checksum
-        for (int i = 0; i < firstChecksumByte - 4; i++) {
+        for (int i = INDEX_TIME_SINCE_LAST_RECEIVE; i < INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength; i++) {
             sum += _packet[i];
         }
         return (sum % 256) == (checksum);
+    }
+
+    bool invalidPacketLength(){
+        // Over maximum, or length does not make it to sensor data index w/o
+        // Header and length section
+        return (
+            this->_packetLength > PACKET_LENGTH_MAX ||
+            this->_packetLength < PACKET_LENGTH_MIN
+            );
     }
 
     void resetParsing(){
@@ -206,62 +224,95 @@ private:
             break;
         
         case RS485Utils::ParseState::LENGTH:
-            if (_currentPacketIndex == 2){
-                // Compare our byte with the
-                this->_packetLength =
-                    static_cast<uint16_t>(this->_packet[1] << 8) |
-                    static_cast<uint16_t>(byte);
+            // Add the byte
+            this->_packet[_currentPacketIndex] = byte;
 
-                if (this->_packetLength > DEFAULT_MAX_LENGTH) {
-                    //Reset the values if the length is too long. There is something wrong
+            if (_currentPacketIndex == 2) {
+                // New packet length
+                _packetLength = static_cast<uint16_t>(_packet[1] << 8) |
+                                static_cast<uint16_t>(_packet[2]);
+                _dataLastIndex = NON_LENGTH_BYTECOUNT + _packetLength - 1;
+
+                if (this->invalidPacketLength()) {
                     this->resetParsing();
-                    return;
+                    break;
                 } else {
-                    // This is the correct length for the packet,
-                    // save for later
-                    this->_packetLength = this->_packetLength;
-
-                    // This is the last index of the data packet. This is the top bound
-                    this->_dataLastIndex = 3 + this->_packetLength - SENSOR_TIME_SECTION_LENGTH_SUM;
-
-                    //Change the state to the body
                     this->_currentPacketState = RS485Utils::ParseState::BODY;
+                    break;
                 }
             }
             
-            // Add the byte
-            this->_packet[_currentPacketIndex++] = byte;
+            // Increment the current packet index
+            _currentPacketIndex++;
 
             break;
         
         case RS485Utils::ParseState::BODY:
             // Check if we are still within the index
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex >= (this->_dataLastIndex)) {
+            if (_currentPacketIndex == (this->_dataLastIndex)) {
                 // This is the last bit, move on to the next part of the packet
-                this->_currentPacketState = RS485Utils::ParseState::CHECKSUM;
+                this->_currentPacketState = RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE;
             }
-
+            
+            // Increment the index, the escape sequence is next
             _currentPacketIndex++;
-            // Add the last value
             break;
         
+        case RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE:
+            this->_packet[_currentPacketIndex] = byte;
+            if (_currentPacketIndex == NON_LENGTH_BYTECOUNT + _packetLength + 3) {
+                // We are on the last byte
+                if (RS485Utils::convertU32InArr(this->_packet, _currentPacketIndex - 3) == BINARY_ESCAPE_SEQUENCE) {
+                    // Packet is correct
+                    this->_currentPacketState = RS485Utils::ParseState::CHECKSUM;
+                    _currentPacketIndex++;
+                } else {
+                    this->resetParsing();
+                }
+            } else {
+                _currentPacketIndex++;
+            }
+
+            break;
+
         case RS485Utils::ParseState::CHECKSUM:
             // Get the 4 bits for the checksum
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex == _dataLastIndex + 4) {
+            if (_currentPacketIndex == _dataLastIndex + 8) {
                 // We are on the last checksum value
                 // We will use the packet to validate the checksum
                if (this->validateChecksum()) {
-                    this->extractData();
+                    // If the checksum is correct, move on to check the escape sequence
+                    this->_currentPacketState = RS485Utils::ParseState::SECOND_ESCAPE_SEQUENCE;
+                    _currentPacketIndex++;
+                } else {
+                    // The checksum failed, we need to reset for the next packet
+                    this->resetParsing();
                 }
-                this->resetParsing();
             } else {
                 // Increment the index, not done with the checksum yet
                 _currentPacketIndex++;
             }
             break;
+        case RS485Utils::ParseState::SECOND_ESCAPE_SEQUENCE:
+            this->_packet[_currentPacketIndex] = byte;
+            if (_currentPacketIndex == _dataLastIndex + 8) {
+                
+                if (RS485Utils::convertU32InArr(this->_packet, _currentPacketIndex - 3) == BINARY_ESCAPE_SEQUENCE) {
+                    // Check the packet, starting from four bits back
 
+                    // Pull the data and add it
+                    this->extractData();
+
+                    // Reset the parser for a clean slate
+                    this->resetParsing();
+                }
+            } else {
+                // Not at the desired last index for the checksum, continue
+                _currentPacketIndex++;
+            }
+            break;
         default:
             this->resetParsing();
             break;

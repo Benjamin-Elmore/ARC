@@ -6,7 +6,9 @@ namespace RS485Utils {
         WAITING_FOR_HEADER,
         LENGTH,
         BODY,
-        CHECKSUM
+        CHECKSUM,
+        FIRST_ESCAPE_SEQUENCE,
+        SECOND_ESCAPE_SEQUENCE
     };
 
     template <size_t S>
