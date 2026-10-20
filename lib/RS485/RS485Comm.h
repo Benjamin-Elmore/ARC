@@ -46,6 +46,7 @@
 #define PACKET_LENGTH_BYTECOUNT                4           // PACKET LENGTH BYTECOUNT
 #define SENSOR_TIME_SECTION_BYTECOUNT_SUM      4           // BYTECOUNT OF TWO TIME SECTIONS
 #define SENSOR_ID_SECTION_BYTECOUNT            8           // SENSOR ID BYTECOUNT
+#define ESCAPE_SEQUENCE_BYTECOUNT              4           // ESCAPE SEQUENCE BYTECOUNT
 
 // CONSISTENT FIRST INDICES PACKET SECTIONS
 #define INDEX_PACKET_LENGTH                 1           // PACKET LENGTH (Time, Time, ID, Data)
@@ -105,8 +106,13 @@ public:
         }
     }
 
-    void addSensortoRegistry(RS485InterfaceSensor* sensor) {
+    esp_err_t addSensortoRegistry(RS485InterfaceSensor* sensor) {
+        if (sensor->getID() == 0) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
         _registryMap.emplace(sensor->getID(), sensor);
+        return ESP_OK;
     }
 
     // Checker for the RS485 comms
@@ -174,7 +180,23 @@ private:
         this->calculateSensorIDs();
 
         if (this->_isFirstRead) {
-            //TODO: Add offset inputting and writing in the registry
+            // Loop through the entire set of sensors
+            for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
+                // Check if the map contains the sensor ID
+                if (_registryMap.contains(_sensorIDS[i])) {
+                    //Add the offsets to a vector and pass it to set offsets
+
+                    Vec3<uint16_t> offsets;
+                    offsets.x = static_cast<uint16_t>(_packet[INDEX_SENSOR_DATA + (3 * i)]);
+                    offsets.y = static_cast<uint16_t>(_packet[INDEX_SENSOR_DATA + (3 * i) + 1]);
+                    offsets.z = static_cast<uint16_t>(_packet[INDEX_SENSOR_DATA + (3 * i) + 2]);
+
+                    (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
+                }
+            }
+
+            // Finished the offset setting for the first read.
+            _isFirstRead = false;
         }
     }
 
@@ -185,7 +207,7 @@ private:
         uint32_t sum{};
 
         // First checksum byte = First index for times since last + _packetLength + 4 bytes (esc sequence)
-        uint16_t firstChecksumByte{INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength + 4};
+        uint16_t firstChecksumByte = static_cast<uint16_t>(INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength + ESCAPE_SEQUENCE_BYTECOUNT);
         uint32_t checksum{RS485Utils::convertU32InArr(_packet, firstChecksumByte)};
 
         // Add each item of the packet together, up to right before our checksum

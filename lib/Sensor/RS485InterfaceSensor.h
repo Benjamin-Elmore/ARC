@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string_view>
+#include "Vec3.h"
 
 class RS485InterfaceSensor {
     public:
@@ -8,6 +9,7 @@ class RS485InterfaceSensor {
 
         virtual std::string_view getName() = 0;
         virtual uint8_t getID() = 0;
-        virtual void setOffsets() = 0;
+
+        virtual void setOffsets(Vec3<uint16_t> o) = 0;
         virtual void registerSensor() = 0;
 };

@@ -1,18 +1,26 @@
 #pragma once
-#include <functional>
-#include <unordered_map>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+#include "esp_err.h"
+#include "Vec3.h"
+
 
 // Forward declaration for Sensor<N>
-template <size_t N>
+template <std::size_t N>
 class Sensor;
 
 namespace SensorUtils {
     constexpr uint8_t UNUSED_MUX = 0xFF;
     constexpr uint8_t ADDR_NOT_INCLUDED = 0xFF;
     constexpr uint8_t FAULTY_VARIABLE = 0xFF;
+    constexpr uint8_t UNUSED_OFFSET_REG = 0xFF;
+
+    constexpr uint16_t UNUSED_OFFSETS = 0xFFFF;
 
     //STRUCTURE OF A FUNCTION CALLBACK
-    template <size_t N>
+    template <std::size_t N>
     using FunctionCallback = void(*)(Sensor<N>&);
     using EspErrorCallback = esp_err_t(*)();
 
@@ -51,7 +59,7 @@ namespace SensorUtils {
     return "?";  // Defensive fallback for an invalid/out-of-range enum value.
 }
 
-    template <size_t N>
+    template <std::size_t N>
     struct AppendedMethod {
         std::string_view methodName;
         FunctionCallback<N> method;
@@ -65,4 +73,16 @@ namespace SensorUtils {
 
         AppendedVariable(std::string_view name, uint16_t variable) : variableName(name), variable(variable){};
     };
-}
+
+    inline void convertOffsetsToArr(
+        uint8_t (&packet)[6],
+        const Vec3<uint16_t>& o
+    ) {
+        packet[0] = static_cast<uint8_t>(o.x >> 8);
+        packet[1] = static_cast<uint8_t>(o.x & 0xFF);
+        packet[2] = static_cast<uint8_t>(o.y >> 8);
+        packet[3] = static_cast<uint8_t>(o.y & 0xFF);
+        packet[4] = static_cast<uint8_t>(o.z >> 8);
+        packet[5] = static_cast<uint8_t>(o.z & 0xFF);
+    }
+};

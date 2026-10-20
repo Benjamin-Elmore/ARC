@@ -81,10 +81,11 @@ class Sensor : RS485InterfaceSensor {
                 std::initializer_list<FunctionCallback> appendedOnLoop = {},                    // LOOP FUNCTIONS
                 std::initializer_list<SensorUtils::AppendedMethod<N>> appendedMethods = {},     // APPENDED METHODS
                 std::initializer_list<SensorUtils::AppendedVariable> appendedVariables = {},    // APPENDED VARIABLES
-                FunctionCallback sensorReadFunction = NULL                                      // READ FUNCTION
+                FunctionCallback sensorReadFunction = NULL,                                     // READ FUNCTION
+                uint8_t offsetMemReg = SensorUtils::UNUSED_OFFSET_REG                           // MEM REG FOR OFFSETS
             )
             : _name(name), _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority),
-            _sensorID(deviceNumber)
+            _sensorID(deviceNumber), _offsetMemReg(offsetMemReg)
         {
 
             if (sensorType != SensorPreconfig::NONE){
@@ -280,6 +281,9 @@ class Sensor : RS485InterfaceSensor {
             this->_offsets.x = o.x;
             this->_offsets.y = o.y;
             this->_offsets.z = o.z;
+
+            // Change the memory registry for the sensor offsets
+            this->setSensorOffsets();
         }
 
     protected:
@@ -296,6 +300,7 @@ class Sensor : RS485InterfaceSensor {
         // CRITICAL DATA:
         Vec3<uint16_t> _offsets{};
         uint8_t _sensorID{};
+        uint8_t _offsetMemReg{};
 
         //OPTIONAL MEMBERS:
         uint8_t _devAddrI2C = SensorUtils::ADDR_NOT_INCLUDED;
@@ -308,6 +313,48 @@ class Sensor : RS485InterfaceSensor {
         //APPENDED METHODS AND VARIABLES, stored in hash tables
         std::unordered_map<std::string_view, FunctionCallback> _appendedMethods = {};
         std::unordered_map<std::string_view, uint16_t> _appendedVariables = {};
+
+        void confirmStatus(esp_err_t status) {
+            // Check the status of the mux, and if it's not ESP_OK,
+            // change the bus's status.
+
+            if (status != ESP_OK && this->_status == SensorUtils::SENSOR_OK) {
+                this->_errorStatus = SensorUtils::SENSOR_ERR_IO;
+            }
+        }
+
+        void setSensorOffsets() {
+            if (
+                this->_offsets.x != SensorUtils::UNUSED_OFFSETS &&
+                this->_offsets.y != SensorUtils::UNUSED_OFFSETS &&
+                this->_offsets.y != SensorUtils::UNUSED_OFFSETS
+            ) {
+                for(;;) {
+                    // Run through this loop to wait for the mutex
+                    LockGuard lock(this->_sensorCommBusI2C.getMutex());
+
+                    if (lock.isMutexLocked()) {
+                        // Select the mux channel
+                        this->confirmStatus(_sensorCommBusI2C.selectMuxChannel(this->getName()));
+
+                        // Create the write buffer for the offsets
+                        uint8_t offsetWriteBuf[6]{};
+                        SensorUtils::convertOffsetsToArr(offsetWriteBuf, _offsets);
+
+                        // Write the buffer
+                        this->confirmStatus(
+                            _sensorCommBusI2C.writeArrayRegister(this->getName(),
+                            _offsetMemReg,
+                            offsetWriteBuf
+                        ));
+
+                        break;
+                    }
+
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            }
+        }
 
         void executeFunctionList(std::list<FunctionCallback>& funcList) {
             // Execute all of the functions in the linked list
