@@ -137,6 +137,7 @@ private:
     RS485Utils::ParseState _currentPacketState{RS485Utils::ParseState::WAITING_FOR_HEADER};
     size_t _currentPacketIndex{};
     uint16_t _dataLastIndex{};
+    bool _validPacket{false};
 
     // PACKET DATA, persistent for a complete packet
     uint8_t _packet[DEFAULT_MAX_PAYLOAD]{};
@@ -144,6 +145,101 @@ private:
     uint32_t _timeSinceLastReceive{};
     uint32_t _timeOfSending{};
     uint8_t _sensorIDS[2 * SENSOR_ID_SECTION_BYTECOUNT]{};
+
+    uint64_t _receivedTime{};
+
+    void compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
+        packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
+
+        //NOTE: We wait to add the length until the end with the full packet
+        
+        // TIME OF SENDING AND TIME SINCE RECEIVE
+        const uint32_t timeNow = esp_timer_get_time();
+
+        const uint32_t timeSinceReceive = static_cast<uint32_t>(timeNow - _receivedTime);
+        const uint32_t timeSending = static_cast<uint32_t>(timeNow);
+
+        RS485Utils::writeU32ToArr(packet, INDEX_TIME_SINCE_LAST_RECEIVE, timeSinceReceive);
+        RS485Utils::writeU32ToArr(packet, INDEX_TIME_SENT, timeSending);
+
+        // SENSOR IDS
+        // Sensor IDS will always be even since 2 * MAX_SENSOR IDS is always even
+        for (int i = 0; i < SENSOR_ID_SECTION_BYTECOUNT; i++) {
+            // Get even and odd id
+            uint8_t first = _registryMap.contains(_sensorIDS[2 * i]) ? _sensorIDS[2 * i] : 0;
+            uint8_t second = _registryMap.contains(_sensorIDS[2 * i + 1]) ? _sensorIDS[2 * i + 1] : 0;
+
+            // Place as a compacted byte at target index
+            packet[INDEX_SENSOR_IDS + i] = static_cast<uint8_t>((first << 4) | (second & 0xF));
+        }
+
+        // DATA
+        // The index we need will need to be reduced based on how many sensors we are sending.
+        // We include the data here.
+
+        // Loop invariant that controls the length based on the size
+        // (invariant += 6) each time we add data to the variable data section
+        uint8_t packetLengthInvariant{PACKET_LENGTH_MIN};
+
+        for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
+            // Each sensor portion uses 6 positions in the packet, so for each iteration
+            // (6 * i + INDEX_SENSOR_DATA) gives you the first position of where to place the first
+            // byte.
+
+            if (_sensorIDS[i] == 0) {
+                continue;
+            }
+
+            packetLengthInvariant = PACKET_LENGTH_MIN + 6 * (i + 1);
+
+            if(_registryMap.contains(_sensorIDS[i])) {
+                Vec3<uint16_t> reading = (_registryMap.at(_sensorIDS[i]))->getReadings();
+                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, reading.x);
+                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, reading.y);
+                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, reading.z);
+            } else {
+                
+            }
+        }
+
+        // LENGTH
+        // The invariant is now equal to the minimum length + our variable data
+        // We can now write the length in the packet
+        RS485Utils::writeU16ToArr(packet, INDEX_PACKET_LENGTH, packetLengthInvariant);
+        
+        // FIRST ESCAPE SEQUENCE
+        // Index found by taking the starting index where the length is measured, and adding the length invariant
+        // we found.
+        RS485Utils::writeU32ToArr(
+            packet,
+            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant,
+            BINARY_ESCAPE_SEQUENCE
+        );
+
+        // CHECKSUM
+        RS485Utils::writeU32ToArr(
+            packet,
+            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 4,
+            this->calculateChecksum(packet, packetLengthInvariant)
+        );
+
+        RS485Utils::writeU32ToArr(
+            packet,
+            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 8,
+            BINARY_ESCAPE_SEQUENCE
+        );
+    }
+
+    void sendData(){
+        // Send a responding data packet based on a validated packet received
+        // from the V5 
+
+        uint8_t sendingPacket[DEFAULT_MAX_PAYLOAD]{};
+
+        this->compileSentPacket(sendingPacket);
+
+        return; //TODO: Add sendData function
+    }
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs
@@ -200,21 +296,28 @@ private:
         }
     }
 
+    template <size_t S>
+    uint32_t calculateChecksum(const uint8_t (&packet)[S], const uint16_t packetLength) {
+        uint32_t sum{};
+        for (int i = INDEX_TIME_SINCE_LAST_RECEIVE; i < INDEX_TIME_SINCE_LAST_RECEIVE + packetLength; i++) {
+            sum += packet[i];
+        }
+
+        return sum % 256;
+    }
+
     bool validateChecksum(){
         // Validate the checksum given in the packet.
         // Checked by modulo 256 
-
-        uint32_t sum{};
 
         // First checksum byte = First index for times since last + _packetLength + 4 bytes (esc sequence)
         uint16_t firstChecksumByte = static_cast<uint16_t>(INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength + ESCAPE_SEQUENCE_BYTECOUNT);
         uint32_t checksum{RS485Utils::convertU32InArr(_packet, firstChecksumByte)};
 
         // Add each item of the packet together, up to right before our checksum
-        for (int i = INDEX_TIME_SINCE_LAST_RECEIVE; i < INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength; i++) {
-            sum += _packet[i];
-        }
-        return (sum % 256) == (checksum);
+        uint32_t sum = calculateChecksum(_packet, _packetLength);
+
+        return (sum) == (checksum);
     }
 
     bool invalidPacketLength(){
@@ -242,6 +345,8 @@ private:
                 this->_currentPacketIndex = 1; // Next _currentPacketIndex
                 _currentPacketState = RS485Utils::ParseState::LENGTH;
                 return; // This bit is done
+            } else {
+                _validPacket = false;
             }
             break;
         
@@ -260,6 +365,7 @@ private:
                     break;
                 } else {
                     this->_currentPacketState = RS485Utils::ParseState::BODY;
+                    _currentPacketIndex++;
                     break;
                 }
             }
@@ -301,7 +407,7 @@ private:
         case RS485Utils::ParseState::CHECKSUM:
             // Get the 4 bits for the checksum
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex == _dataLastIndex + 8) {
+            if (_currentPacketIndex == _dataLastIndex + 12) {
                 // We are on the last checksum value
                 // We will use the packet to validate the checksum
                if (this->validateChecksum()) {
@@ -326,7 +432,8 @@ private:
 
                     // Pull the data and add it
                     this->extractData();
-
+                    this->_validPacket = true;
+                    _receivedTime = esp_timer_get_time();
                     // Reset the parser for a clean slate
                     this->resetParsing();
                 }
@@ -354,6 +461,10 @@ private:
                 // UART read bytes, and we will parse them and send the requested data
                 for (int i = 0; i < received; i++) {
                     this->parseByte(this->_lastReadBytes[i]);
+                    if (this->_validPacket) {
+                        this->_validPacket = false;
+                        this->sendData();
+                    }
                 }
             }
         }
