@@ -223,6 +223,7 @@ private:
             this->calculateChecksum(packet, packetLengthInvariant)
         );
 
+        // SECOND ESCAPE SEQUENCE
         RS485Utils::writeU32ToArr(
             packet,
             INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 8,
@@ -238,7 +239,17 @@ private:
 
         this->compileSentPacket(sendingPacket);
 
-        return; //TODO: Add sendData function
+        int bytesWritten = uart_write_bytes(
+            UART_NUM_1,
+            sendingPacket,
+            sizeof(sendingPacket)
+        );
+
+        if (bytesWritten != static_cast<int>(sizeof(sendingPacket))) {
+            this->_status = ESP_ERR_INVALID_STATE;
+        }
+
+        return;
     }
 
     void calculateSensorIDs(){
