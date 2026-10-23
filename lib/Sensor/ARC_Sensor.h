@@ -73,7 +73,7 @@ class Sensor : RS485InterfaceSensor {
                 char* name,                                                                     // NAME of the Sensor
                 I2CBus<N>& sensorCommBus,                                                       // BUS CLASS for Sensor
                 uint8_t deviceAddrI2C,                                                          // I2C ADDRESS
-                uint8_t deviceNumber,                                                           // DEVICE NUMBER
+                uint8_t deviceID,                                                               // DEVICE ID
                 SensorPreconfig sensorType = SensorPreconfig::NONE,                             // SENSOR PRECONFIG
                 uint8_t muxChannel = SensorUtils::UNUSED_MUX,                                   // MUX CHANNEL
                 uint8_t priority = DEFAULT_PRIORITY,                                            // SENSOR TASK PRIORITY
@@ -85,7 +85,7 @@ class Sensor : RS485InterfaceSensor {
                 uint8_t offsetMemReg = SensorUtils::UNUSED_OFFSET_REG                           // MEM REG FOR OFFSETS
             )
             : _name(name), _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority),
-            _sensorID(deviceNumber), _offsetMemReg(offsetMemReg)
+            _sensorID(deviceID), _offsetMemReg(offsetMemReg)
         {
 
             if (sensorType != SensorPreconfig::NONE){
@@ -131,8 +131,6 @@ class Sensor : RS485InterfaceSensor {
             } else{
                 this->_status = SensorUtils::SENSOR_ERR_NO_READER;
             }
-            
-            RS485ARSENAL::addSensor(this);
         }
 
         // DESTRUCTOR:
@@ -151,22 +149,28 @@ class Sensor : RS485InterfaceSensor {
         Sensor(const Sensor&) = delete;
         Sensor& operator=(const Sensor&) = delete;
 
-        void setup() {
+        SensorUtils::sensor_status_t setup() {
             // Setup the sensor, and start the RTOS task
             // When a child class inherits this class, the super
             // of setup() must be called.
 
             if(this->_setupRan) {
                 this->_status = SensorUtils::SENSOR_ERR_FUNC_CALL;
-                return;
+                return SensorUtils::SENSOR_ERR_FUNC_CALL;
             }
 
             // Add the sensor to the I2C bus with its address identifier
-            this->_sensorCommBusI2C.addSensorClassToBus(
+            esp_err_t busStatus = this->_sensorCommBusI2C.addSensorClassToBus(
                 this->getName(),
                 this->_muxChannel,
                 this->_devAddrI2C
             );
+
+            if (busStatus != ESP_OK) {
+                // Adding the sensor to the bus failed
+                this->_status = SensorUtils::SENSOR_ERR_IO;
+                return SensorUtils::SENSOR_ERR_IO;
+            }
 
             // Execute the functions in the "on startup" list
             // Only completed if there are functions in the list
@@ -175,7 +179,7 @@ class Sensor : RS485InterfaceSensor {
             }
 
             // Create the RTOS Task and store it in taskObject
-            BaseType_t status = xTaskCreatePinnedToCore
+            BaseType_t taskStatus = xTaskCreatePinnedToCore
             (
                 _taskEntry,             //Task Loop
                 this->_name,            //Loop Name
@@ -186,12 +190,25 @@ class Sensor : RS485InterfaceSensor {
                 this->_core             //Core
             );
 
-            if (status != pdFALSE) {
-                this->_status = SensorUtils::SENSOR_OK;
-                this->_setupRan = true;
-            } else {
+            if (taskStatus != pdPASS) {
                 this->_status = SensorUtils::SENSOR_ERR_FAULT;
+                this->fullStopFAIL();
+                return SensorUtils::SENSOR_ERR_FAULT;
             }
+
+            // Register Sensor on the RS485Comm
+            const esp_err_t regStatus = this->registerSensor();
+
+            if (regStatus != ESP_OK) {
+                this->_status = SensorUtils::SENSOR_ERR_IO;
+                this->fullStopFAIL();
+                return SensorUtils::SENSOR_ERR_IO;
+            }
+
+            this->_status = SensorUtils::SENSOR_OK;
+            this->_setupRan = true;
+
+            return SensorUtils::SENSOR_OK;
         }
 
         void appendMethod(std::string_view functionName, FunctionCallback function) {
@@ -265,7 +282,7 @@ class Sensor : RS485InterfaceSensor {
 
         uint8_t getMuxI2C() { return this->_muxChannel; }
 
-        uint8_t getID() { return this->_sensorID; }
+        uint8_t getID() override { return this->_sensorID; }
 
         // WRAPPERS FOR I2CBus
         esp_err_t readDeviceRegister(const uint8_t regAddr, uint8_t *data, const size_t length) {
@@ -286,6 +303,15 @@ class Sensor : RS485InterfaceSensor {
             this->setSensorOffsets();
         }
 
+        Vec3<uint16_t> getReadings() override {
+            Vec3<uint16_t> reading = {this->_reading.x, this->_reading.y, this->_reading.z};
+            return reading;
+        }
+
+        esp_err_t registerSensor() override {
+            return RS485ARSENAL::addSensor(this);
+        }
+
     protected:
         // Meant to be interfaced with in child classes
 
@@ -296,11 +322,13 @@ class Sensor : RS485InterfaceSensor {
         char* _name;
 
         FunctionCallback _readFunction = NULL;
-
+        
         // CRITICAL DATA:
         Vec3<uint16_t> _offsets{};
         uint8_t _sensorID{};
         uint8_t _offsetMemReg{};
+
+        Vec3<uint16_t> _reading{};
 
         //OPTIONAL MEMBERS:
         uint8_t _devAddrI2C = SensorUtils::ADDR_NOT_INCLUDED;
@@ -314,12 +342,19 @@ class Sensor : RS485InterfaceSensor {
         std::unordered_map<std::string_view, FunctionCallback> _appendedMethods = {};
         std::unordered_map<std::string_view, uint16_t> _appendedVariables = {};
 
+        void fullStopFAIL() {
+            if (_taskObject != nullptr) {
+                vTaskDelete(_taskObject);
+                _taskObject = nullptr;
+            }
+        }
+
         void confirmStatus(esp_err_t status) {
             // Check the status of the mux, and if it's not ESP_OK,
             // change the bus's status.
 
             if (status != ESP_OK && this->_status == SensorUtils::SENSOR_OK) {
-                this->_errorStatus = SensorUtils::SENSOR_ERR_IO;
+                this->_status = SensorUtils::SENSOR_ERR_IO;
             }
         }
 
@@ -389,7 +424,13 @@ class Sensor : RS485InterfaceSensor {
                     } else if (this->_readFunction != NULL) {
                         // Run the preconfigured read function
                         // The if statement is for safety
-                        this->_readFunction(*this);
+                        const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName());
+
+                        if (muxStatus != ESP_OK){
+                            this->confirmStatus(muxStatus)
+                        } else {
+                            this->_readFunction(*this);
+                        }
                     }
                 }
 

@@ -100,10 +100,6 @@ public:
             RS485_COMM_UART,
             UART_MODE_RS485_HALF_DUPLEX
         );
-
-        if (this->checkCommStatus()) {
-            this->createRTOSTask();
-        }
     }
 
     esp_err_t addSensortoRegistry(RS485InterfaceSensor* sensor) {
@@ -113,6 +109,19 @@ public:
 
         _registryMap.emplace(sensor->getID(), sensor);
         return ESP_OK;
+    }
+
+    esp_err_t start() {
+        if (this->_taskObject != nullptr) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        if (this->_status != ESP_OK) {
+            return this->_status;
+        }
+
+        this->createRTOSTask();
+        return this->_status;
     }
 
     // Checker for the RS485 comms
@@ -418,7 +427,7 @@ private:
         case RS485Utils::ParseState::CHECKSUM:
             // Get the 4 bits for the checksum
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex == _dataLastIndex + 12) {
+            if (_currentPacketIndex == _dataLastIndex + 8) {
                 // We are on the last checksum value
                 // We will use the packet to validate the checksum
                if (this->validateChecksum()) {
@@ -436,7 +445,7 @@ private:
             break;
         case RS485Utils::ParseState::SECOND_ESCAPE_SEQUENCE:
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex == _dataLastIndex + 8) {
+            if (_currentPacketIndex == _dataLastIndex + 12) {
                 
                 if (RS485Utils::convertU32InArr(this->_packet, _currentPacketIndex - 3) == BINARY_ESCAPE_SEQUENCE) {
                     // Check the packet, starting from four bits back
@@ -446,8 +455,11 @@ private:
                     this->_validPacket = true;
                     _receivedTime = esp_timer_get_time();
                     // Reset the parser for a clean slate
-                    this->resetParsing();
+                } else {
+                    _validPacket = false;
                 }
+
+                this->resetParsing();
             } else {
                 // Not at the desired last index for the checksum, continue
                 _currentPacketIndex++;

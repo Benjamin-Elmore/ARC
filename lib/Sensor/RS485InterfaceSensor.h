@@ -11,6 +11,6 @@ class RS485InterfaceSensor {
         virtual uint8_t getID() = 0;
 
         virtual void setOffsets(Vec3<uint16_t> o) = 0;
-        virtual void registerSensor() = 0;
+        virtual esp_err_t registerSensor() = 0;
         virtual Vec3<uint16_t> getReadings() = 0;
 };
