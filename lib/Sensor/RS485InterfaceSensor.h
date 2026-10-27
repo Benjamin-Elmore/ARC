@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string_view>
+#include <cstdint>
+#include "esp_err.h"
 #include "Vec3.h"
 
 class RS485InterfaceSensor {

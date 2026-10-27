@@ -4,22 +4,35 @@
 #include "RS485InterfaceSensor.h"
 
 namespace RS485ARSENAL {
-    RS485Comm* BaseRS485Instance = nullptr;
+    inline RS485Comm* BaseRS485Instance = nullptr;
 
-    void startRS485Instance() {
-        BaseRS485Instance = new RS485Comm();
+    inline void createRS485Instance() {
+        struct SharedInstance {
+            RS485Comm comm;
+            ~SharedInstance() { BaseRS485Instance = nullptr; }
+        };
+
+        static SharedInstance instance;
+        BaseRS485Instance = &instance.comm;
+
     }
 
-    esp_err_t addSensor(RS485InterfaceSensor* sensor) {
-        if (RS485ARSENAL::BaseRS485Instance == nullptr) {
-            RS485ARSENAL::startRS485Instance();
+    inline esp_err_t addSensor(RS485InterfaceSensor* sensor) {
+        if (!BaseRS485Instance) {
+            RS485ARSENAL::createRS485Instance();
         }
 
         return BaseRS485Instance->addSensortoRegistry(sensor);
     }
 
-    esp_err_t startRS485ARSENAL() {
-        if (BaseRS485Instance == nullptr) {
+    inline void removeSensor(RS485InterfaceSensor* sensor) {
+        if (BaseRS485Instance) {
+            BaseRS485Instance->removeSensorFromRegistry(sensor);
+        }
+    }
+
+    inline esp_err_t startRS485ARSENAL() {
+        if (!BaseRS485Instance) {
             return ESP_ERR_INVALID_STATE;
         }
 

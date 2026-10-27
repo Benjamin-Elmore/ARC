@@ -5,6 +5,7 @@
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_timer.h"
 
 #include "RS485Utils.h"
@@ -103,11 +104,28 @@ public:
     }
 
     esp_err_t addSensortoRegistry(RS485InterfaceSensor* sensor) {
+        if (sensor == nullptr) { return ESP_ERR_INVALID_ARG; }
         if (sensor->getID() == 0) {
             return ESP_ERR_INVALID_ARG;
         }
 
         _registryMap.emplace(sensor->getID(), sensor);
+        return ESP_OK;
+    }
+
+    esp_err_t removeSensorFromRegistry(RS485InterfaceSensor* sensor) {
+        if (sensor == nullptr) { return ESP_ERR_INVALID_ARG; }
+        if (sensor->getID() == 0) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        const auto it = _registryMap.find(sensor->getID());
+
+        if (it == _registryMap.end() || it->second != sensor) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        _registryMap.erase(it);
         return ESP_OK;
     }
 
