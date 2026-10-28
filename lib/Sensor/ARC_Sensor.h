@@ -87,8 +87,8 @@ class Sensor : public RS485InterfaceSensor {
                 FunctionCallback sensorReadFunction = NULL,                                     // READ FUNCTION
                 uint8_t offsetMemReg = SensorUtils::UNUSED_OFFSET_REG                           // MEM REG FOR OFFSETS
             )
-            : _name(name == nullptr ? "" : name), _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority),
-            _sensorID(deviceID), _offsetMemReg(offsetMemReg)
+            : _name(name == nullptr ? "" : name), _sensorID(deviceID), _offsetMemReg(offsetMemReg),
+            _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority)
         {
 
             if (sensorType != SensorPreconfig::NONE){
@@ -185,7 +185,7 @@ class Sensor : public RS485InterfaceSensor {
                     continue;
                 }
 
-                const esp_err_t busStatus = _sensorCommBusI2C.addSensorClassToBus(
+                const esp_err_t busStatus = _sensorCommBusI2C.addSensorToBus(
                     getName(), _muxChannel, _devAddrI2C
                 );
                 if (busStatus != ESP_OK) {
@@ -193,10 +193,11 @@ class Sensor : public RS485InterfaceSensor {
                     return _status;
                 }
 
-                const esp_err_t muxStatus =
-                    _sensorCommBusI2C.selectMuxChannel(getName());
+                const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(getName());
                 if (muxStatus != ESP_OK) {
+                    _sensorCommBusI2C.removeSensorFromBus(this->getName());
                     _status = SensorUtils::SENSOR_ERR_IO;
+
                     return _status;
                 }
 
@@ -221,6 +222,9 @@ class Sensor : public RS485InterfaceSensor {
                 return SensorUtils::SENSOR_ERR_IO;
             }
 
+            // The sensor has been registered for RS485
+            this->_status = SensorUtils::SENSOR_OK;
+
             // Create the RTOS Task and store it in taskObject
             BaseType_t taskStatus = xTaskCreatePinnedToCore
             (
@@ -239,7 +243,6 @@ class Sensor : public RS485InterfaceSensor {
                 return SensorUtils::SENSOR_ERR_FAULT;
             }
 
-            this->_status = SensorUtils::SENSOR_OK;
             this->_setupRan = true;
 
             return SensorUtils::SENSOR_OK;
@@ -551,7 +554,9 @@ class Sensor : public RS485InterfaceSensor {
 
         bool _exceededMaximums{false};
         bool _setupRan{false};
-        SensorUtils::sensor_status_t _status {SensorUtils::SENSOR_ERR_NOT_READY};
+        // _status is atomic as the RS485Comm task has a route to change this from
+        // its task loop
+        std::atomic<SensorUtils::sensor_status_t> _status = {SensorUtils::SENSOR_ERR_NOT_READY};
         portMUX_TYPE _readingMux = portMUX_INITIALIZER_UNLOCKED;
         std::atomic<bool> _stopeRequested{false};
 

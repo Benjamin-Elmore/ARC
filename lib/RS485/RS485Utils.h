@@ -26,21 +26,29 @@ namespace RS485Utils {
     }
 
     template <size_t S>
-    void writeU16ToArr(uint8_t (&packet)[S], const uint8_t startingIndex, const uint16_t& value) {
-        for (int i = 0; i < 2; i++) {
-            // Write the high byte first, followed by the low byte.
-            packet[startingIndex + i] =
-                static_cast<uint8_t>((value >> (8 * (1 - i))) & 0xFFu);
-        }
-    }
-
-    template <size_t S>
     void writeU32ToArr(uint8_t (&packet)[S], const uint8_t startingIndex, const uint32_t& value) {
         for (int i = 0; i < 4; i++) {
             // Shift by 24, 16, 8, then 0 bits.
             // Keep the lowest 8 bits and write them into the packet.
             packet[startingIndex + i] =
                 static_cast<uint8_t>((value >> (8 * (3 - i))) & 0xFFu);
+        }
+    }
+
+    template <size_t S>
+    uint16_t convertU16InArr(const uint8_t (&packet)[S], const size_t startingIndex) {
+        return static_cast<uint16_t>(
+            (static_cast<uint16_t>(packet[startingIndex]) << 8)
+            | static_cast<uint16_t>(packet[startingIndex + 1])
+        );
+    }
+
+    template <size_t S>
+    void writeU16ToArr(uint8_t (&packet)[S], const uint8_t startingIndex, const uint16_t& value) {
+        for (int i = 0; i < 2; i++) {
+            // Write the high byte first, followed by the low byte.
+            packet[startingIndex + i] =
+                static_cast<uint8_t>((value >> (8 * (1 - i))) & 0xFFu);
         }
     }
 };

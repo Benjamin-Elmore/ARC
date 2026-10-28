@@ -14,7 +14,6 @@ namespace RS485ARSENAL {
 
         static SharedInstance instance;
         BaseRS485Instance = &instance.comm;
-
     }
 
     inline esp_err_t addSensor(RS485InterfaceSensor* sensor) {

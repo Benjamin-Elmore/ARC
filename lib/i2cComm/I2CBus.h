@@ -7,7 +7,9 @@
 #include <cstring>
 
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_rom_sys.h"
 
 #include "LockGuard.h"
 
@@ -41,8 +43,9 @@ public:
         gpio_num_t gpioSCL,
         gpio_num_t gpioSDA,
         i2c_port_t i2cPort,
+        gpio_num_t gpioReset = GPIO_NUM_NC,
         std::array<uint8_t, N> muxAddresses = {}
-    ) : _gpioSCL(gpioSCL), _gpioSDA(gpioSDA), _i2cPort(i2cPort), _muxAddresses(muxAddresses) {
+    ) : _gpioSCL(gpioSCL), _gpioSDA(gpioSDA), _gpioReset(gpioReset), _i2cPort(i2cPort), _muxAddresses(muxAddresses) {
         this->setupI2CBus();
     }
 
@@ -79,7 +82,21 @@ public:
             return;
         }
 
+        // Add an error if the mux doesn't have the correct arguments passed
+        // in the constructor
+        if (N > 0 && (_muxAddresses.size() == 0 || _gpioReset == GPIO_NUM_NC)) {
+            this->_errorStatus = ESP_ERR_INVALID_ARG;
+            return;
+        }
+
+        // With the existence of any muxes, we reset them for setup
+        // We've already checked for invalid muxes, so this is safe
+        if (N > 0) {
+            this->resetMuxes();
+        }
+
         // For loop for validating the muxes in the bus
+        // Mux Addresses cannot match, nested for loop below checks for this
         for (size_t i = 0; i < N; ++i) {
             if (_muxAddresses[i] == 0 || _muxAddresses[i] > 0x7F) {
                 confirmStatus(ESP_ERR_INVALID_ARG); return;
@@ -129,6 +146,22 @@ public:
             }
         }
 
+        // Set up gpio reset pin for muxes
+        if(!this->confirmStatus(gpio_set_level(_gpioReset, 1))) {
+            return;
+        }
+
+        gpio_config_t config{};
+        config.pin_bit_mask = 1ULL << _gpioReset;
+        config.mode = GPIO_MODE_OUTPUT;
+        config.pull_up_en = GPIO_PULLUP_DISABLE;
+        config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        config.intr_type = GPIO_INTR_DISABLE;
+
+        if(!this->confirmStatus(gpio_config(&config))) {
+            return;
+        }
+
         // Once the muxes are added to the i2c bus, instantiate the RTOS mutex for the bus
         this->_busMutex = xSemaphoreCreateMutex();
 
@@ -140,7 +173,7 @@ public:
         this->_intialized = true;
     }
 
-    esp_err_t addSensorClassToBus (std::string_view name, uint8_t muxChannel, uint8_t i2cAddress) {
+    esp_err_t addSensorToBus (std::string_view name, uint8_t muxChannel, uint8_t i2cAddress) {
         if (!_intialized) { return ESP_ERR_INVALID_STATE; }
         if (this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
 
@@ -248,6 +281,29 @@ public:
         return ret;
     }
 
+    esp_err_t resetMuxes() {
+        if (N == 0 || _gpioReset == GPIO_NUM_NC) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        LockGuard lock (this->_busMutex);
+        if (lock.isMutexLocked()){
+            if (!this->confirmStatus(gpio_set_level(_gpioReset, 0))) {
+                return _errorStatus;
+            }
+
+            esp_rom_delay_us(10);
+
+            if (!this->confirmStatus(gpio_set_level(_gpioReset, 1))) {
+                return _errorStatus;
+            }
+
+            esp_rom_delay_us(10);
+        }
+
+        return ESP_OK;
+    }
+
     bool confirmStatus(esp_err_t status) {
         // Check the status of the mux, and if it's not ESP_OK,
         // change the bus's status.
@@ -335,6 +391,7 @@ private:
     // I2C Port and pins
     const gpio_num_t _gpioSCL{};
     const gpio_num_t _gpioSDA{};
+    const gpio_num_t _gpioReset{};
     const i2c_port_t _i2cPort{};
 
     // Bus Mutex

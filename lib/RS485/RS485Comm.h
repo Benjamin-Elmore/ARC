@@ -78,6 +78,8 @@ public:
         // Run config with this comm as UART_NUM_1
         this->_status = uart_param_config(RS485_COMM_UART, &configUart);
 
+        if (!checkCommStatus()) { return; }
+
         this->_status = uart_set_pin(
             RS485_COMM_UART,
             UART_TX_PIN,
@@ -85,6 +87,8 @@ public:
             UART_RTS_PIN,
             UART_PIN_NO_CHANGE
         );
+
+        if (!checkCommStatus()) { return; }
 
         // Set up drivers for UART
         this->_status = uart_driver_install(
@@ -96,6 +100,8 @@ public:
             0
         );
 
+        if (!checkCommStatus()) { return; }
+
         // Set the comm mode that the ESP32 is using
         this->_status = uart_set_mode(
             RS485_COMM_UART,
@@ -104,22 +110,34 @@ public:
     }
 
     esp_err_t addSensortoRegistry(RS485InterfaceSensor* sensor) {
+        // Included to prevent registration add/remove once RTOS task is started
+        if (_taskObject != nullptr) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
         if (sensor == nullptr) { return ESP_ERR_INVALID_ARG; }
-        if (sensor->getID() == 0) {
+        const uint8_t id = sensor->getID();
+        if (id == 0 || id > 15) {
             return ESP_ERR_INVALID_ARG;
         }
 
-        _registryMap.emplace(sensor->getID(), sensor);
-        return ESP_OK;
+        const bool inserted = _registryMap.emplace(id, sensor).second;
+        return inserted ? ESP_OK : ESP_ERR_INVALID_ARG;
     }
 
     esp_err_t removeSensorFromRegistry(RS485InterfaceSensor* sensor) {
+        // Included to prevent registration add/remove once RTOS task is started
+        if (_taskObject != nullptr) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
         if (sensor == nullptr) { return ESP_ERR_INVALID_ARG; }
-        if (sensor->getID() == 0) {
+        const uint8_t id = sensor->getID();
+        if (id == 0 || id > 15) {
             return ESP_ERR_INVALID_ARG;
         }
 
-        const auto it = _registryMap.find(sensor->getID());
+        const auto it = _registryMap.find(id);
 
         if (it == _registryMap.end() || it->second != sensor) {
             return ESP_ERR_INVALID_ARG;
@@ -175,7 +193,7 @@ private:
 
     uint64_t _receivedTime{};
 
-    void compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
+    size_t compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
         packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
 
         //NOTE: We wait to add the length until the end with the full packet
@@ -256,6 +274,9 @@ private:
             INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 8,
             BINARY_ESCAPE_SEQUENCE
         );
+
+        // Return the size of the packet
+        return NON_LENGTH_BYTECOUNT + packetLengthInvariant + 3 * ESCAPE_SEQUENCE_BYTECOUNT;
     }
 
     void sendData(){
@@ -264,15 +285,16 @@ private:
 
         uint8_t sendingPacket[DEFAULT_MAX_PAYLOAD]{};
 
-        this->compileSentPacket(sendingPacket);
+        // Compile the packet, get its actual length, not sizeof(sendingPacket)
+        size_t packetSize = this->compileSentPacket(sendingPacket);
 
         int bytesWritten = uart_write_bytes(
             UART_NUM_1,
             sendingPacket,
-            sizeof(sendingPacket)
+            packetSize
         );
 
-        if (bytesWritten != static_cast<int>(sizeof(sendingPacket))) {
+        if (bytesWritten != static_cast<int>(packetSize)) {
             this->_status = ESP_ERR_INVALID_STATE;
         }
 
@@ -320,10 +342,15 @@ private:
                 if (_registryMap.contains(_sensorIDS[i])) {
                     //Add the offsets to a vector and pass it to set offsets
 
-                    Vec3<uint16_t> offsets;
-                    offsets.x = static_cast<uint16_t>(_packet[INDEX_SENSOR_DATA + (3 * i)]);
-                    offsets.y = static_cast<uint16_t>(_packet[INDEX_SENSOR_DATA + (3 * i) + 1]);
-                    offsets.z = static_cast<uint16_t>(_packet[INDEX_SENSOR_DATA + (3 * i) + 2]);
+                    // Base index for each iteration
+                    const size_t base = INDEX_SENSOR_DATA + 6 * i;
+
+                    // Write the offsets
+                    Vec3<uint16_t> offsets{
+                        RS485Utils::convertU16InArr(_packet, base),
+                        RS485Utils::convertU16InArr(_packet, base + 2),
+                        RS485Utils::convertU16InArr(_packet, base + 4)
+                    };
 
                     (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
                 }
