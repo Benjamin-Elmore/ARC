@@ -78,11 +78,12 @@ namespace SensorUtils {
         uint8_t (&packet)[6],
         const Vec3<uint16_t>& o
     ) {
-        packet[0] = static_cast<uint8_t>(o.x >> 8);
-        packet[1] = static_cast<uint8_t>(o.x & 0xFF);
-        packet[2] = static_cast<uint8_t>(o.y >> 8);
-        packet[3] = static_cast<uint8_t>(o.y & 0xFF);
-        packet[4] = static_cast<uint8_t>(o.z >> 8);
-        packet[5] = static_cast<uint8_t>(o.z & 0xFF);
+        // OTOS offset registers store each component low byte first.
+        packet[0] = static_cast<uint8_t>(o.x & 0xFF);
+        packet[1] = static_cast<uint8_t>(o.x >> 8);
+        packet[2] = static_cast<uint8_t>(o.y & 0xFF);
+        packet[3] = static_cast<uint8_t>(o.y >> 8);
+        packet[4] = static_cast<uint8_t>(o.z & 0xFF);
+        packet[5] = static_cast<uint8_t>(o.z >> 8);
     }
 };
