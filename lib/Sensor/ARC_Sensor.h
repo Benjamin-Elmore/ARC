@@ -8,6 +8,8 @@
 #include <list>
 #include <string>
 #include <atomic>
+#include <cstdio>
+#include <cinttypes>
 
 // RTOS
 #include "freertos/FreeRTOS.h"
@@ -77,6 +79,7 @@ class Sensor : public RS485InterfaceSensor {
                 I2CBus<N>& sensorCommBus,                                                       // BUS CLASS for Sensor
                 uint8_t deviceAddrI2C,                                                          // I2C ADDRESS
                 uint8_t deviceID,                                                               // DEVICE ID
+                bool printReadings = false,                                                     // PRINT READINGS
                 SensorPreconfig sensorType = SensorPreconfig::NONE,                             // SENSOR PRECONFIG
                 uint8_t muxChannel = SensorUtils::UNUSED_MUX,                                   // MUX CHANNEL
                 uint8_t priority = DEFAULT_PRIORITY,                                            // SENSOR TASK PRIORITY
@@ -87,8 +90,14 @@ class Sensor : public RS485InterfaceSensor {
                 FunctionCallback sensorReadFunction = NULL,                                     // READ FUNCTION
                 uint8_t offsetMemReg = SensorUtils::UNUSED_OFFSET_REG                           // MEM REG FOR OFFSETS
             )
-            : _name(name == nullptr ? "" : name), _sensorID(deviceID), _offsetMemReg(offsetMemReg),
-            _devAddrI2C(deviceAddrI2C), _sensorCommBusI2C(sensorCommBus), _muxChannel(muxChannel), _priority(priority)
+            : _name(name == nullptr ? "" : name),
+              _outputReadings(printReadings),
+              _sensorID(deviceID),
+              _offsetMemReg(offsetMemReg),
+              _devAddrI2C(deviceAddrI2C),
+              _sensorCommBusI2C(sensorCommBus),
+              _muxChannel(muxChannel),
+              _priority(priority)
         {
 
             if (sensorType != SensorPreconfig::NONE){
@@ -249,7 +258,7 @@ class Sensor : public RS485InterfaceSensor {
         }
 
         void requestStop() {
-            _stopeRequested.store(true);
+            _stopRequested.store(true);
         }
 
         void appendMethod(std::string_view functionName, FunctionCallback function) {
@@ -352,6 +361,15 @@ class Sensor : public RS485InterfaceSensor {
 
         uint8_t getID() override { return this->_sensorID; }
 
+        void printReadings() {
+            printf("%s READINGS", std::string(this->_name).c_str());
+            printf("X: %d", this->_reading.x);
+            printf("Y: %d", this->_reading.y);
+            printf("H: %d", this->_reading.z);
+
+            return;
+        }
+
         // WRAPPERS FOR I2CBus
         esp_err_t readDeviceRegister(const uint8_t regAddr, uint8_t *data, const size_t length) {
             esp_err_t status = this->_sensorCommBusI2C.readRegister(this->_name, regAddr, data, length);
@@ -366,13 +384,14 @@ class Sensor : public RS485InterfaceSensor {
         }
 
         // OFFSET SETTER
-        void setOffsets(Vec3<uint16_t> o) override {
+        esp_err_t setOffsets(Vec3<uint16_t> o) override {
             this->_offsets.x = o.x;
             this->_offsets.y = o.y;
             this->_offsets.z = o.z;
 
             // Change the memory registry for the sensor offsets
-            this->setSensorOffsets();
+            // Return the success
+            return this->setSensorOffsets();
         }
 
         void setReadings(const Vec3<uint16_t>& reading) {
@@ -400,6 +419,7 @@ class Sensor : public RS485InterfaceSensor {
 
         // Constructor-defined variables
         std::string _name;
+        bool _outputReadings{};
 
         FunctionCallback _readFunction = NULL;
         
@@ -439,11 +459,11 @@ class Sensor : public RS485InterfaceSensor {
             }
         }
 
-        void setSensorOffsets() {
+        esp_err_t setSensorOffsets() {
 
             if (_offsetMemReg == SensorUtils::UNUSED_OFFSET_REG) {
                 _status = SensorUtils::SENSOR_ERR_ARG;
-                return;
+                return _status;
             }
 
             if (
@@ -453,7 +473,7 @@ class Sensor : public RS485InterfaceSensor {
             ) {
                 if (_sensorCommBusI2C.getMutex() == nullptr) {
                     _status = SensorUtils::SENSOR_ERR_IO;
-                    return;
+                    return _status;
                 }
 
                 for(;;) {
@@ -467,7 +487,7 @@ class Sensor : public RS485InterfaceSensor {
                         confirmStatus(muxStatus);
 
                         if (muxStatus != ESP_OK) {
-                            return;
+                            return muxStatus;
                         }
 
                         // Create the write buffer for the offsets
@@ -475,18 +495,21 @@ class Sensor : public RS485InterfaceSensor {
                         SensorUtils::convertOffsetsToArr(offsetWriteBuf, _offsets);
 
                         // Write the buffer
-                        this->confirmStatus(
-                            _sensorCommBusI2C.writeArrayRegister(this->getName(),
+                        esp_err_t status = _sensorCommBusI2C.writeArrayRegister(
+                            this->getName(),
                             _offsetMemReg,
                             offsetWriteBuf
-                        ));
-
-                        break;
+                        );
+                        
+                        confirmStatus(status);
+                        return _status;
                     }
 
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
             }
+
+            return ESP_OK;
         }
 
         void executeFunctionList(std::list<FunctionCallback>& funcList) {
@@ -501,7 +524,7 @@ class Sensor : public RS485InterfaceSensor {
         // TASK LOOP utilized within the actual RTOS task
         void taskLoop() {
             // Loop on RTOS TASK
-            while (!_stopeRequested.load()) {
+            while (!_stopRequested.load()) {
                 if (this->_readFunction == NULL) {
                     // The reader function does not exist, the delay needs to go in place
                     // This task is useless without the critical read function
@@ -537,6 +560,10 @@ class Sensor : public RS485InterfaceSensor {
                     this->executeFunctionList(this->_loopFuncs);
                 }
 
+                if (_outputReadings) {
+                    this->printReadings();
+                }
+
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
 
@@ -558,7 +585,7 @@ class Sensor : public RS485InterfaceSensor {
         // its task loop
         std::atomic<SensorUtils::sensor_status_t> _status = {SensorUtils::SENSOR_ERR_NOT_READY};
         portMUX_TYPE _readingMux = portMUX_INITIALIZER_UNLOCKED;
-        std::atomic<bool> _stopeRequested{false};
+        std::atomic<bool> _stopRequested{false};
 
         // WRAPPER ON TASK LOOP for RTOS Task
         static void _taskEntry(void* ptr) {

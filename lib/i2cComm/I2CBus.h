@@ -84,15 +84,9 @@ public:
 
         // Add an error if the mux doesn't have the correct arguments passed
         // in the constructor
-        if (N > 0 && (_muxAddresses.size() == 0 || _gpioReset == GPIO_NUM_NC)) {
+        if (N > 0 && _muxAddresses.size() == 0) {
             this->_errorStatus = ESP_ERR_INVALID_ARG;
             return;
-        }
-
-        // With the existence of any muxes, we reset them for setup
-        // We've already checked for invalid muxes, so this is safe
-        if (N > 0) {
-            this->resetMuxes();
         }
 
         // For loop for validating the muxes in the bus
@@ -146,20 +140,22 @@ public:
             }
         }
 
-        // Set up gpio reset pin for muxes
-        if(!this->confirmStatus(gpio_set_level(_gpioReset, 1))) {
-            return;
-        }
+        // A mux may have RESET held high in hardware instead of wired to a GPIO.
+        if (N > 0 && _gpioReset != GPIO_NUM_NC) {
+            if (!this->confirmStatus(gpio_set_level(_gpioReset, 1))) {
+                return;
+            }
 
-        gpio_config_t config{};
-        config.pin_bit_mask = 1ULL << _gpioReset;
-        config.mode = GPIO_MODE_OUTPUT;
-        config.pull_up_en = GPIO_PULLUP_DISABLE;
-        config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        config.intr_type = GPIO_INTR_DISABLE;
+            gpio_config_t config{};
+            config.pin_bit_mask = 1ULL << _gpioReset;
+            config.mode = GPIO_MODE_OUTPUT;
+            config.pull_up_en = GPIO_PULLUP_DISABLE;
+            config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+            config.intr_type = GPIO_INTR_DISABLE;
 
-        if(!this->confirmStatus(gpio_config(&config))) {
-            return;
+            if (!this->confirmStatus(gpio_config(&config))) {
+                return;
+            }
         }
 
         // Once the muxes are added to the i2c bus, instantiate the RTOS mutex for the bus
@@ -168,6 +164,13 @@ public:
         if (!_busMutex) {
             confirmStatus(ESP_ERR_NO_MEM);
             return;
+        }
+
+        // resetMuxes() needs both the configured GPIO and the bus mutex.
+        if (N > 0 && _gpioReset != GPIO_NUM_NC) {
+            if (!this->confirmStatus(this->resetMuxes())) {
+                return;
+            }
         }
 
         this->_intialized = true;

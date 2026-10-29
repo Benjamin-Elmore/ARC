@@ -2,6 +2,8 @@
 
 #include <unordered_map>
 #include <string_view>
+#include <cstdio>
+#include <cinttypes>
 
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
@@ -63,7 +65,8 @@
 class RS485Comm{
 public:
     // CONSTRUCTOR:
-    RS485Comm(){
+    RS485Comm(int txPin = UART_TX_PIN, int rxPin = UART_RX_PIN, int enablePin = UART_RTS_PIN)
+        : _txPin(txPin), _rxPin(rxPin), _enablePin(enablePin) {
         
         // Configuration object for uart_param_config
         uart_config_t configUart = {
@@ -82,9 +85,9 @@ public:
 
         this->_status = uart_set_pin(
             RS485_COMM_UART,
-            UART_TX_PIN,
-            UART_RX_PIN,
-            UART_RTS_PIN,
+            _txPin,
+            _rxPin,
+            _enablePin,
             UART_PIN_NO_CHANGE
         );
 
@@ -163,8 +166,56 @@ public:
     // Checker for the RS485 comms
     bool checkCommStatus(){ return (this->_status == ESP_OK); }
 
+    void setSerialMonitoring(bool on) {
+        _serialMonitoring = on;
+        return;
+    }
+
+    void serialStatus() {
+        const char* stateName = "UNKNOWN";
+        switch (_currentPacketState) {
+        case RS485Utils::ParseState::WAITING_FOR_HEADER: stateName = "WAITING_FOR_HEADER"; break;
+        case RS485Utils::ParseState::LENGTH: stateName = "LENGTH"; break;
+        case RS485Utils::ParseState::BODY: stateName = "BODY"; break;
+        case RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE: stateName = "FIRST_ESCAPE_SEQUENCE"; break;
+        case RS485Utils::ParseState::CHECKSUM: stateName = "CHECKSUM"; break;
+        case RS485Utils::ParseState::SECOND_ESCAPE_SEQUENCE: stateName = "SECOND_ESCAPE_SEQUENCE"; break;
+        default: break;
+        }
+
+        const auto printBytes = [](const char* label, const uint8_t* bytes, size_t count) {
+            printf("%s (%zu bytes, hex):\n", label, count);
+            for (size_t i = 0; i < count; ++i) {
+                if (i % 16 == 0) { printf("  %03zu: ", i); }
+                printf("%02X%s", static_cast<unsigned int>(bytes[i]),
+                       (i % 16 == 15 || i + 1 == count) ? "\n" : " ");
+            }
+        };
+
+        printf("\n=== SERIAL STATUS ===\n");
+        printf("_status: %s (%" PRId32 ")\n", esp_err_to_name(_status), static_cast<int32_t>(_status));
+        printf("_isFirstRead: %s\n", _isFirstRead ? "true" : "false");
+        printf("_validPacket: %s\n", _validPacket ? "true" : "false");
+        printf("_currentPacketState: %s (%d)\n", stateName, static_cast<int>(_currentPacketState));
+        printf("_packetLength: %u body bytes\n", static_cast<unsigned int>(_packetLength));
+        printf("_timeSinceLastReceive: %" PRIu32 "\n", _timeSinceLastReceive);
+        printf("_timeOfSending: %" PRIu32 "\n", _timeOfSending);
+
+        // Full buffers are shown; unused positions may contain zeros or older bytes.
+        printBytes("_lastReadBytes [full buffer]", _lastReadBytes, sizeof(_lastReadBytes));
+        printBytes("_packet [full buffer]", _packet, sizeof(_packet));
+        printf("_sensorIDS (slot order):");
+        for (const uint8_t id : _sensorIDS) {
+            printf(" %u", static_cast<unsigned int>(id));
+        }
+        printf("\n=====================\n");
+    }
+
 private:
     // CORE FIELDS
+    const int _txPin;
+    const int _rxPin;
+    const int _enablePin;
     esp_err_t _status{ESP_ERR_NOT_FINISHED};
     TaskHandle_t _taskObject = nullptr;
     const char* _name{DEFAULT_COMM_NAME};
@@ -192,6 +243,8 @@ private:
     uint8_t _sensorIDS[2 * SENSOR_ID_SECTION_BYTECOUNT]{};
 
     uint64_t _receivedTime{};
+
+    bool _serialMonitoring{false};
 
     size_t compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
         packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
@@ -326,7 +379,7 @@ private:
         }
     }
 
-    void extractData(){
+    bool extractData(){
         // Extract data from our checked packet
 
         // Time Data
@@ -344,6 +397,12 @@ private:
 
                     // Base index for each iteration
                     const size_t base = INDEX_SENSOR_DATA + 6 * i;
+                    const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
+
+                    if (base + 6 > bodyEnd) {
+                        // Current offsets extend outside of slots
+                        return false;
+                    }
 
                     // Write the offsets
                     Vec3<uint16_t> offsets{
@@ -352,13 +411,21 @@ private:
                         RS485Utils::convertU16InArr(_packet, base + 4)
                     };
 
-                    (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
+                    // Set the offsets, record the result
+                    esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
+
+                    if (result != ESP_OK) {
+                        // Throw an error, we could not set the offsets
+                        return false;
+                    }
                 }
             }
 
             // Finished the offset setting for the first read.
             _isFirstRead = false;
         }
+
+        return true;
     }
 
     template <size_t S>
@@ -495,15 +562,18 @@ private:
                 if (RS485Utils::convertU32InArr(this->_packet, _currentPacketIndex - 3) == BINARY_ESCAPE_SEQUENCE) {
                     // Check the packet, starting from four bits back
 
-                    // Pull the data and add it
-                    this->extractData();
-                    this->_validPacket = true;
-                    _receivedTime = esp_timer_get_time();
-                    // Reset the parser for a clean slate
+                    // Pull the data, packet will be valid if offsets can be written,
+                    // and data can be extracted
+                    _validPacket = this->extractData();
+
+                    if (_validPacket) { 
+                        _receivedTime = esp_timer_get_time();
+                    }
                 } else {
                     _validPacket = false;
                 }
-
+                
+                // Reset the parser for a clean slate
                 this->resetParsing();
             } else {
                 // Not at the desired last index for the checksum, continue
@@ -525,6 +595,8 @@ private:
                 pdMS_TO_TICKS(100)
             );
 
+            printf("UART received: %d\n", received);
+
             if (received > 0) {
                 // UART read bytes, and we will parse them and send the requested data
                 for (int i = 0; i < received; i++) {
@@ -534,6 +606,10 @@ private:
                         this->sendData();
                     }
                 }
+            }
+
+            if (_serialMonitoring) {
+                this->serialStatus();
             }
         }
     }
