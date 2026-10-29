@@ -54,6 +54,6 @@ namespace OpticalPreconfig {
         };
 
         //Write, return the success
-        return commBus.writeArrayRegister<6>(OTOS_REG_OFFSETS, offsetWrite);
+        return commBus.writeArrayRegister<6>(OTOS_REG_OFFSETS, offsetWrite);    
     }
 }

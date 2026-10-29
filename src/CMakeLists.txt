@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS 
         "main.cpp"
-        "sensor_compile_validation.cpp"
     
     INCLUDE_DIRS
         "../lib"
@@ -10,4 +9,10 @@ idf_component_register(
         freertos
         driver
         esp_driver_i2c
+        esp_timer
+)
+
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -fstack-usage
+    -Wstack-usage=2048
 )
