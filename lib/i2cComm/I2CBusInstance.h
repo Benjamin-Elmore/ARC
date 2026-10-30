@@ -2,6 +2,7 @@
 
 #include "I2CBus.h"
 #include "ARC_Sensor.h"
+#include "LockGuard.h"
 
 #define I2C_INSTANCE_MUX_SCL GPIO_NUM_9         // MULTIPLEXER BUS SCL
 #define I2C_INSTANCE_MUX_SDA GPIO_NUM_8         // MULTIPLEXER BUS SDA
@@ -59,38 +60,80 @@ namespace I2CARSENAL {
     }
 
     template <size_t N>
-    inline void addSensorToBus(Bus targetBus, Sensor<N>& sensor) {
+    inline esp_err_t addSensorToBus(Bus targetBus, Sensor<N>& sensor, LockGuard& lock) {
         if (multiplexerBus == nullptr || directBus == nullptr) {
             createI2CInstances();
         }
         
+        I2CBus<N>* operatingBus = nullptr;
+
         switch (targetBus) {
             case MULTIPLEXER_BUS:
-                multiplexerBus->addSensorToBus(sensor.getName(), sensor.getMuxI2C(), sensor.getAddressI2C());
+                if constexpr (N == 2) {
+                    operatingBus = multiplexerBus;
+                }
             break;
             case DIRECT_BUS:
-                directBus->addSensorToBus(sensor.getName(), sensor.getMuxI2C(), sensor.getAddressI2C());
+                if constexpr (N == 0){
+                    operatingBus = directBus;
+                }
             break;
             default:
             break;
         }
+
+        if (operatingBus == nullptr) {
+            // There was an error, this ensures we escape before dereferencing
+            // a null ptr.
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        if (!lock.isMutexLocked()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        return operatingBus->addSensorToBus(
+            sensor.getName(),
+            sensor.getMuxI2C(),
+            sensor.getAddressI2C(),
+            lock
+        );
     }
 
-        template <size_t N>
-    inline void removeSensorFromBus(Bus targetBus, Sensor<N>& sensor) {
+    template <size_t N>
+    inline esp_err_t removeSensorFromBus(Bus targetBus, Sensor<N>& sensor) {
         if (multiplexerBus == nullptr || directBus == nullptr) {
             createI2CInstances();
         }
 
+        I2CBus<N>* operatingBus = nullptr;
+
         switch (targetBus) {
             case MULTIPLEXER_BUS:
-                multiplexerBus->removeSensorFromBus(sensor.getName());
+                if constexpr (N == 2) {
+                    operatingBus = multiplexerBus;
+                }
             break;
             case DIRECT_BUS:
-                directBus->removeSensorFromBus(sensor.getName());
+                if constexpr (N == 0){
+                    operatingBus = directBus;
+                }
             break;
             default:
             break;
         }
+
+        if (operatingBus == nullptr) {
+            // There was an error, this ensures we escape before dereferencing
+            // a null ptr.
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        LockGuard lock(operatingBus->getMutex());
+        if (!lock.isMutexLocked()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        return operatingBus->removeSensorFromBus(sensor.getName(), lock);
     }
 }

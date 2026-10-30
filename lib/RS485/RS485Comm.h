@@ -291,7 +291,15 @@ private:
             packetLengthInvariant = PACKET_LENGTH_MIN + 6 * (i + 1);
 
             if(_registryMap.contains(_sensorIDS[i])) {
-                Vec3<uint16_t> reading = (_registryMap.at(_sensorIDS[i]))->getReadings();
+                Vec3<uint16_t> reading{}; 
+                const bool validResult = (_registryMap.at(_sensorIDS[i]))->getReadings(reading);
+
+                if (!validResult) {
+                    reading.x = 0xFFFF;
+                    reading.y = 0xFFFF;
+                    reading.z = 0xFFFF;
+                }
+
                 RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, reading.x);
                 RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, reading.y);
                 RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, reading.z);

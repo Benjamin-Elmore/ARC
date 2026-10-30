@@ -176,15 +176,25 @@ public:
         this->_intialized = true;
     }
 
-    esp_err_t addSensorToBus (std::string_view name, uint8_t muxChannel, uint8_t i2cAddress) {
+    esp_err_t addSensorToBus (std::string_view name, uint8_t muxChannel, uint8_t i2cAddress, LockGuard& lock) {
         if (!_intialized) { return ESP_ERR_INVALID_STATE; }
-        if (this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
 
+        if (!lock.isMutexLocked()) { return ESP_ERR_INVALID_ARG; }
+
+        // If the sensor was registered during its setup sequence or before,
+        // the sensor already exists on the bus, and the registry is ok.
+        // Nothing needs to happen here, since the Sensor is on the bus
+        if (this->_registryMap.contains(std::string(name))) { return ESP_OK; }
+
+        // Check for faulty arguments
         if (name.empty() || i2cAddress == 0 || i2cAddress > 0x7F ||
             (muxChannel != 0xFF && muxChannel / MUX_CHANNEL_CT >= N)) {
             return ESP_ERR_INVALID_ARG;
         }
 
+        // The channel is a single number value
+        // Here, in the actual code, we split it to separate the mux itself
+        // from its own channel.
         SensorRegistry newSensorRegistry {
             static_cast<uint8_t>(muxChannel / MUX_CHANNEL_CT),                // MUX Index
             static_cast<uint8_t>(muxChannel % MUX_CHANNEL_CT)                 // MUX Channel within Index
@@ -213,7 +223,10 @@ public:
 
     // Caller holds the bus mutex.
     // Stop all users of this device before removing it.
-    esp_err_t removeSensorFromBus(std::string_view name) {
+    esp_err_t removeSensorFromBus(std::string_view name, LockGuard& lock) {
+        
+        if (!lock.isMutexLocked()) { return ESP_ERR_INVALID_ARG; }
+
         const auto it = _registryMap.find(std::string(name));
         if (it == _registryMap.end()) {
             return ESP_ERR_INVALID_ARG;
@@ -229,9 +242,14 @@ public:
         return status;
     }
 
-    inline esp_err_t selectMuxChannel (const std::string_view sensorName) {
+    // A mutex lock is required, so pass through the lock to prove it is a valid selection
+    inline esp_err_t selectMuxChannel (const std::string_view sensorName, LockGuard& lock) {
         // Select a target channel on the mux
         // NOTE: Use only if a mux exists for the I2CBus instance
+
+        if (!lock.isMutexLocked()) {
+            return ESP_ERR_INVALID_ARG;
+        }
 
         const auto sensorIt = this->_registryMap.find(std::string(sensorName));
 
@@ -323,9 +341,16 @@ public:
     esp_err_t getStatus() { return this->_errorStatus; }
 
     SemaphoreHandle_t& getMutex(){ return this->_busMutex; }
+
+    bool containsSensor(std::string_view name) {
+        return _registryMap.contains(std::string(name));
+    }
     
-    esp_err_t readRegister(const std::string_view name, const uint8_t regAddr, uint8_t *data, const size_t length) {
-        //Read the data within the register, returns an esp status of the optical
+    esp_err_t readRegister(const std::string_view name, const uint8_t regAddr, uint8_t *data, const size_t length, LockGuard& lock) {
+        //Read the data within the register, returns an esp status of the sensor
+        
+        // Check if the caller has a valid mutex
+        if (!lock.isMutexLocked()) { return ESP_ERR_INVALID_ARG; }
 
         // If the name of the sensor isn't in the registry, return the error
         if (!this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
@@ -336,8 +361,11 @@ public:
         return i2c_master_transmit_receive(existingRegistry.sensorHandle, &regAddr, 1, data, length, 1000);
     }
 
-    esp_err_t writeRegister(const std::string_view name, uint8_t regAddr, uint8_t data) {
+    esp_err_t writeRegister(const std::string_view name, uint8_t regAddr, uint8_t data, LockGuard& lock) {
         //Write data at a specific register to the optical Sensor
+
+        // Check if the caller has a valid mutex
+        if (!lock.isMutexLocked()) { return ESP_ERR_INVALID_ARG; }
 
         // If the name of the sensor isn't in the registry, return the error
         if (!this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
@@ -350,8 +378,11 @@ public:
     }
 
     template<size_t S>
-    esp_err_t writeArrayRegister(const std::string_view name, const uint8_t regAddr, const uint8_t (&array)[S]) {
+    esp_err_t writeArrayRegister(const std::string_view name, const uint8_t regAddr, const uint8_t (&array)[S], LockGuard& lock) {
         // Write an array of any length to a target
+
+        // Check if the caller has a valid mutex
+        if (!lock.isMutexLocked()) { return ESP_ERR_INVALID_ARG; }
 
         // If the name of the sensor isn't in the registry, return the error
         if (!this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }

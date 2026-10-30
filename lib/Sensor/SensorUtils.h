@@ -5,6 +5,7 @@
 
 #include "esp_err.h"
 #include "Vec3.h"
+#include "LockGuard.h"
 
 
 // Forward declaration for Sensor<N>
@@ -22,7 +23,9 @@ namespace SensorUtils {
     //STRUCTURE OF A FUNCTION CALLBACK
     template <std::size_t N>
     using FunctionCallback = void(*)(Sensor<N>&);
-    using EspErrorCallback = esp_err_t(*)();
+    using EspErrorFunctionCallback = esp_err_t(*)();
+    template <std::size_t N>
+    using ReadFuncCallback = void(*)(Sensor<N>&, LockGuard&);
 
     typedef enum {
         SENSOR_OK = 0,            // Operation completed successfully.
