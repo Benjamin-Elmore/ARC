@@ -340,9 +340,10 @@ public:
             }
 
             esp_rom_delay_us(10);
+        } else {
+            this->confirmStatus(ESP_ERR_INVALID_STATE, "resetMuxes: mutex lock not held");
+            return ESP_ERR_INVALID_STATE;
         }
-
-        return ESP_OK;
     }
 
     bool confirmStatus(esp_err_t status, const char* location) {
@@ -350,7 +351,7 @@ public:
         if (status != ESP_OK) {
             // Print the Error in I2CBus, with location and status
 
-            ESP_LOGE("I2CBus", "%s: %s (%d)",
+            ESP_LOGE("I2CBus", "%s: %s",
                     location,
                     esp_err_to_name(status)
             );

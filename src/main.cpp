@@ -9,7 +9,7 @@ extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Starting RS485-only test: TX=2 RX=3 ENABLE=4, 115200 baud");
     static RS485Comm comm25(2, 3, 4);
-    comm25.setSerialMonitoring(true);
+    // comm25.setSerialMonitoring(true);
     if (!comm25.checkCommStatus()) {
         ESP_LOGE(TAG, "RS485 UART setup failed");
         comm25.serialStatus();
