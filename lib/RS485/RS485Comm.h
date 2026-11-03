@@ -69,14 +69,13 @@ public:
         : _txPin(txPin), _rxPin(rxPin), _enablePin(enablePin) {
         
         // Configuration object for uart_param_config
-        uart_config_t configUart = {
-            .baud_rate = BAUD_RATE,
-            .data_bits = UART_DATA_8_BITS,
-            .parity = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-            .source_clk = UART_SCLK_DEFAULT
-        };
+        uart_config_t configUart{};
+        configUart.baud_rate = BAUD_RATE;
+        configUart.data_bits = UART_DATA_8_BITS;
+        configUart.parity = UART_PARITY_DISABLE;
+        configUart.stop_bits = UART_STOP_BITS_1;
+        configUart.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+        configUart.source_clk = UART_SCLK_DEFAULT;
 
         // Run config with this comm as UART_NUM_1
         this->_status = uart_param_config(RS485_COMM_UART, &configUart);
