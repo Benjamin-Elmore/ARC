@@ -13,55 +13,6 @@
 #include "RS485Utils.h"
 #include "RS485InterfaceSensor.h"
 
-// UART CONFIGURATIONS
-#define RS485_COMM_UART UART_NUM_1
-#ifndef UART_RTS_PIN
-#define UART_RTS_PIN    14      // TRANSMIT/RECIEVE ENABLE
-#endif
-#ifndef UART_TX_PIN
-#define UART_TX_PIN     17      // TRANSMIT PIN
-#endif
-#ifndef UART_RX_PIN
-#define UART_RX_PIN     18      // RECEIVE PIN
-#endif
-#define BAUD_RATE       115200  // BITS PER SECOND
-
-// COMM DEFAULT VALUES
-#define DEFAULT_COMM_PRIORITY           1
-#define DEFAULT_COMM_NAME               "RS485Comm"
-#define DEFAULT_COMM_TASK_STACK_SIZE    4096
-#define DEFAULT_COMM_TASK_CORE          1
-#define DEFAULT_COMM_RX_BUFF            128
-#define DEFAULT_MAX_PAYLOAD             128
-#define DEFAULT_MAX_LENGTH              121
-
-// BINARY HEADERS
-#define BINARY_COMM_READ            0b100000    // READING DATA
-#define BINARY_COMM_UPDATE          0b010000    // UPDATE VALUES
-#define BINARY_COMM_RESET_START     0b111111    // START RESET
-#define BINARY_COMM_RESET_CONT      0b111110    // CONTINUE RESET
-#define BINARY_COMM_RESET_END       0b101010    // END RESET
-#define BINARY_COMM_REBOOT          0b010101    // REBOOT ARSENAL
-#define BINARY_ESCAPE_SEQUENCE      0xDEADBEEF  // ESCAPE SEQUENCE
-
-// SIZE OF SECTIONS
-#define NON_LENGTH_BYTECOUNT                   3           // # OF BYTES BEFORE LENGTH
-#define PACKET_LENGTH_BYTECOUNT                4           // PACKET LENGTH BYTECOUNT
-#define SENSOR_TIME_SECTION_BYTECOUNT_SUM      4           // BYTECOUNT OF TWO TIME SECTIONS
-#define SENSOR_ID_SECTION_BYTECOUNT            8           // SENSOR ID BYTECOUNT
-#define ESCAPE_SEQUENCE_BYTECOUNT              4           // ESCAPE SEQUENCE BYTECOUNT
-
-// CONSISTENT FIRST INDICES PACKET SECTIONS
-#define INDEX_PACKET_LENGTH                 1           // PACKET LENGTH (Time, Time, ID, Data)
-#define INDEX_TIME_SINCE_LAST_RECEIVE       3           // TIME SINCE LAST RECEIVE
-#define INDEX_TIME_SENT                     7           // TIME OF SENDING
-#define INDEX_SENSOR_IDS                    11          // SENSOR IDs
-#define INDEX_SENSOR_DATA                   19          // SENSOR_DATA
-
-// MAX AND MIN FOR PACKET LENGTH
-#define PACKET_LENGTH_MIN           16      // MIN
-#define PACKET_LENGTH_MAX           113     // MAX
-
 class RS485Comm{
 public:
     // CONSTRUCTOR:
@@ -236,6 +187,7 @@ private:
 
     // PACKET DATA, persistent for a complete packet
     uint8_t _packet[DEFAULT_MAX_PAYLOAD]{};
+    uint8_t _packetHeader{};
     uint16_t _packetLength{};
     uint32_t _timeSinceLastReceive{};
     uint32_t _timeOfSending{};
@@ -244,6 +196,14 @@ private:
     uint64_t _receivedTime{};
 
     bool _serialMonitoring{false};
+
+    // PARSER FUNCTIONS
+    bool parseRead();
+    bool parseResetStart();
+    bool parseResetContinue();
+    bool parseResetEnd();
+    bool parseReboot();
+    bool parseFailure();
 
     size_t compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
         packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
@@ -389,48 +349,56 @@ private:
     bool extractData(){
         // Extract data from our checked packet
 
+        // Packet Header, determining what packet we received
+        this->_packetHeader = _packet[0];
+
         // Time Data
         this->_timeSinceLastReceive = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SINCE_LAST_RECEIVE);
         this->_timeOfSending        = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SENT);
         
         this->calculateSensorIDs();
 
-        if (this->_isFirstRead) {
-            // Loop through the entire set of sensors
-            for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
-                // Check if the map contains the sensor ID
-                if (_registryMap.contains(_sensorIDS[i])) {
-                    //Add the offsets to a vector and pass it to set offsets
-
-                    // Base index for each iteration
-                    const size_t base = INDEX_SENSOR_DATA + 6 * i;
-                    const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
-
-                    if (base + 6 > bodyEnd) {
-                        // Current offsets extend outside of slots
-                        return false;
-                    }
-
-                    // Write the offsets
-                    Vec3<uint16_t> offsets{
-                        RS485Utils::convertU16InArr(_packet, base),
-                        RS485Utils::convertU16InArr(_packet, base + 2),
-                        RS485Utils::convertU16InArr(_packet, base + 4)
-                    };
-
-                    // Set the offsets, record the result
-                    esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
-
-                    if (result != ESP_OK) {
-                        // Throw an error, we could not set the offsets
-                        return false;
-                    }
-                }
-            }
-
-            // Finished the offset setting for the first read.
-            _isFirstRead = false;
+        if (_packetHeader == BINARY_COMM_RESET_START) {
+            this->parseResetStart();
         }
+
+
+        // if (this->_isFirstRead) {
+        //     // Loop through the entire set of sensors
+        //     for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
+        //         // Check if the map contains the sensor ID
+        //         if (_registryMap.contains(_sensorIDS[i])) {
+        //             //Add the offsets to a vector and pass it to set offsets
+
+        //             // Base index for each iteration
+        //             const size_t base = INDEX_SENSOR_DATA + 6 * i;
+        //             const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
+
+        //             if (base + 6 > bodyEnd) {
+        //                 // Current offsets extend outside of slots
+        //                 return false;
+        //             }
+
+        //             // Write the offsets
+        //             Vec3<uint16_t> offsets{
+        //                 RS485Utils::convertU16InArr(_packet, base),
+        //                 RS485Utils::convertU16InArr(_packet, base + 2),
+        //                 RS485Utils::convertU16InArr(_packet, base + 4)
+        //             };
+
+        //             // Set the offsets, record the result
+        //             esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
+
+        //             if (result != ESP_OK) {
+        //                 // Throw an error, we could not set the offsets
+        //                 return false;
+        //             }
+        //         }
+        //     }
+
+        //     // Finished the offset setting for the first read.
+        //     _isFirstRead = false;
+        // }
 
         return true;
     }
@@ -478,7 +446,7 @@ private:
         switch (_currentPacketState)
         {
         case RS485Utils::ParseState::WAITING_FOR_HEADER:
-            if ((byte >> 2) == BINARY_COMM_READ) {
+            if (RS485Utils::isValidHeader(byte >> 2)) {
                 this->_packet[_currentPacketIndex] = byte;
 
                 this->_currentPacketIndex = 1; // Next _currentPacketIndex
@@ -645,3 +613,5 @@ private:
        reinterpret_cast<RS485Comm*>(ptr)->getBytesLoop();
     }
 };
+
+#include "RS485CommParser.h"
