@@ -1,4 +1,5 @@
 #include "RS485Comm.h"
+#include "Logging/SdLogger.h"
 #include "esp_log.h"
 
 namespace {
@@ -24,4 +25,8 @@ extern "C" void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "RS485 receiver started; waiting for V5 requests (no sensors registered)");
+
+#ifdef ARC_ENABLE_SD_LOGGING
+    SDLogging::startSdLogger();
+#endif
 }
