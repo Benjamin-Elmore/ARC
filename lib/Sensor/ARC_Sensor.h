@@ -20,11 +20,12 @@
 #include "SensorUtils.h"
 #include "LockGuard.h"
 #include "Vec3.h"
-// #include "OpticalPreconfig.h" // Deferred until optical preset work resumes.
 #include "I2CBus.h"
 #include "RS485Comm.h"
 #include "RS485InterfaceSensor.h"
 #include "RS485Instance.h"
+
+#include "OpticalSensorConfig.h"
 
 // MAXIMUM VALUES PER SENSOR
 #ifndef SENSOR_MAX_FILTERS
@@ -52,19 +53,6 @@
 #define LOCK_FAIL_DELAY 50
 #endif
 
-
-
-enum FunctionReferences {
-    ON_SETUP,
-    ON_LOOP
-};
-
-enum SensorPreconfig {
-    NONE,
-    OPTICAL,
-    COLOR,
-    ENCODER
-};
 template <size_t N>
 class Sensor : public RS485InterfaceSensor {
     public:
@@ -81,13 +69,14 @@ class Sensor : public RS485InterfaceSensor {
                 uint8_t deviceAddrI2C,                                                          // I2C ADDRESS
                 uint8_t deviceID,                                                               // DEVICE ID
                 bool printReadings = false,                                                     // PRINT READINGS
-                SensorPreconfig sensorType = SensorPreconfig::NONE,                             // SENSOR PRECONFIG
+                SensorUtils::SensorConfig sensorType = SensorUtils::SensorConfig::NONE,         // SENSOR PRECONFIG
                 uint8_t muxChannel = SensorUtils::UNUSED_MUX,                                   // MUX CHANNEL
                 uint8_t priority = DEFAULT_PRIORITY,                                            // SENSOR TASK PRIORITY
                 std::initializer_list <FunctionCallback> appendedOnSetup = {},                  // STARTUP FUNCTIONS
                 std::initializer_list<FunctionCallback> appendedOnLoop = {},                    // LOOP FUNCTIONS
                 std::initializer_list<SensorUtils::AppendedMethod<N>> appendedMethods = {},     // APPENDED METHODS
                 std::initializer_list<SensorUtils::AppendedVariable> appendedVariables = {},    // APPENDED VARIABLES
+                std::initializer_list<SensorUtils::AppendedOffset> appendedOffsets = {},        // APPENDED OFFSETS
                 ReadFuncCallback sensorReadFunction = NULL,                                     // READ FUNCTION
                 uint8_t offsetMemReg = SensorUtils::UNUSED_OFFSET_REG                           // MEM REG FOR OFFSETS
             )
@@ -100,10 +89,6 @@ class Sensor : public RS485InterfaceSensor {
               _muxChannel(muxChannel),
               _priority(priority)
         {
-
-            if (sensorType != SensorPreconfig::NONE){
-                //TODO: Add preconfig function for reader
-            }
             // SETUP AND LOOP SETUP
             // the FuncHead fields hold the head of the linked list
             if (appendedOnSetup.size() != 0){
@@ -137,6 +122,9 @@ class Sensor : public RS485InterfaceSensor {
             }
             for (const SensorUtils::AppendedVariable& variable : appendedVariables) {
                 this->appendVariable(variable.variableName, variable.variable);
+            }
+            for (const SensorUtils::AppendedOffset& offset : appendedOffsets) {
+                this->appendMethod(method.methodName, method.method);
             }
 
             if (sensorReadFunction != NULL) {
@@ -270,6 +258,15 @@ class Sensor : public RS485InterfaceSensor {
             _stopRequested.store(true);
         }
 
+        bool setSensorType(SensorUtils::SensorPreconfig preconfig) override {
+            // Set the type of sensor and add the relevant values needed.
+
+            this->_type = preconfig;
+            if (preconfig == SensorUtils::SensorConfig::OPTICAL) {
+                
+            }
+        }
+
         void appendMethod(std::string_view functionName, FunctionCallback function) {
             // Append a method to the hash table
 
@@ -289,6 +286,24 @@ class Sensor : public RS485InterfaceSensor {
             }
             
             this->_appendedMethods.emplace(functionName, function);
+        }
+
+        void appendOffset(std::string_view offsetName, uint16_t offset, uint8_t memRegistry) {
+            // Append a variable to the hash table
+
+            if (_appendedOffsets.contains(offsetName)) {
+                _status = SensorUtils::SENSOR_ERR_ARG;
+                return;
+            }
+
+            if (this->_appendedOffsets.size() >= SENSOR_USER_SLOTS) {
+                this->_status = SensorUtils::SENSOR_ERR_FULL;
+                return;
+            }
+            
+            SensorUtils::AppendedOffset newOffset(offsetName, offset, memRegistry);
+
+            this->_appendedOffsets.emplace(offsetName, newOffset);
         }
 
         void appendVariable(std::string_view variableName, uint16_t variable) {
@@ -477,6 +492,7 @@ class Sensor : public RS485InterfaceSensor {
         //APPENDED METHODS AND VARIABLES, stored in hash tables
         std::unordered_map<std::string_view, FunctionCallback> _appendedMethods = {};
         std::unordered_map<std::string_view, uint16_t> _appendedVariables = {};
+        std::unordered_map<std::string_view, SensorUtils::AppendedOffset> _appendedOffsets = {};
 
         void fullStopFAIL() {
             if (_taskObject != nullptr) {
@@ -620,6 +636,8 @@ class Sensor : public RS485InterfaceSensor {
 
         uint8_t _core{1};
         uint8_t _priority{DEFAULT_PRIORITY};
+
+        SensorUtils::SensorConfig _type{};
 
         bool _exceededMaximums{false};
         bool _setupRan{false};

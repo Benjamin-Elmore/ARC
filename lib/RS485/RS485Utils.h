@@ -54,6 +54,9 @@
 #define PACKET_LENGTH_MIN           16      // MIN
 #define PACKET_LENGTH_MAX           113     // MAX
 
+// PARSER DATA
+#define MAX_OFFSET_VECTOR_COUNT 3
+
 namespace RS485Utils {
 
     constexpr std::array<std::uint8_t, 6> PacketHeaders = {
