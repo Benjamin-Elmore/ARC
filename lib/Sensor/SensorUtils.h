@@ -82,6 +82,12 @@ namespace SensorUtils {
         Failure = BINARY_COMM_FAILURE
     };
 
+    enum class OffsetLayout {
+        REG_8_BIT,
+        REG_16_BIT_LOW_FIRST,
+        REG_16_BIT_HIGH_FIRST
+    };
+
     template <std::size_t N>
     struct AppendedMethod {
         std::string_view methodName;
@@ -102,11 +108,12 @@ namespace SensorUtils {
         uint8_t memoryRegistry;
         uint8_t packetSection; // Index into the packet's offset vectors.
         uint8_t component;     // 0 = x, 1 = y, 2 = z.
+        OffsetLayout layout;
 
         AppendedOffset(std::string_view name, uint16_t value, uint8_t memoryRegistry,
-                       uint8_t packetSection, uint8_t component) :
+                       uint8_t packetSection, uint8_t component, OffsetLayout layout) :
             name(name), value(value), memoryRegistry(memoryRegistry),
-            packetSection(packetSection), component(component) {}
+            packetSection(packetSection), component(component), layout(layout) {}
     };
 
     inline void convertOffsetsToArr(

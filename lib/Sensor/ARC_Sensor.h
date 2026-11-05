@@ -125,7 +125,7 @@ class Sensor : public RS485InterfaceSensor {
             }
             for (const SensorUtils::AppendedOffset& offset : appendedOffsets) {
                 this->appendOffset(offset.name, offset.value, offset.memoryRegistry,
-                                   offset.packetSection, offset.component);
+                                   offset.packetSection, offset.component, offset.layout);
             }
 
             if (sensorReadFunction != NULL) {
@@ -259,13 +259,11 @@ class Sensor : public RS485InterfaceSensor {
             _stopRequested.store(true);
         }
 
-        bool setSensorType(SensorUtils::SensorPreconfig preconfig) override {
+        bool setSensorType(SensorUtils::SensorConfig config) override {
             // Set the type of sensor and add the relevant values needed.
 
-            this->_type = preconfig;
-            if (preconfig == SensorUtils::SensorConfig::OPTICAL) {
-                
-            }
+            this->_type = config;
+            return true;
         }
 
         void appendMethod(std::string_view functionName, FunctionCallback function) {
@@ -291,7 +289,7 @@ class Sensor : public RS485InterfaceSensor {
 
         void appendOffset(
             std::string_view offsetName, uint16_t offset, uint8_t memRegistry,
-            uint8_t packetSection, uint8_t component
+            uint8_t packetSection, uint8_t component, SensorUtils::OffsetLayout layout
         ) {
 
             if (
@@ -313,7 +311,8 @@ class Sensor : public RS485InterfaceSensor {
                 offset,
                 memRegistry,
                 packetSection,
-                component
+                component,
+                layout
             );
 
             this->_appendedOffsets.emplace(offsetName, newOffset);
@@ -443,28 +442,25 @@ class Sensor : public RS485InterfaceSensor {
         esp_err_t setOffsets(std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsetArr) override {
             // Basic offsets
 
-            for (int i = 0; i < offsetArr.size(); i++){
-                // set up the vector of offsets
-                const uint16_t singlePktOffset[3] = {offsetArr[i].x, offsetArr[i].y, offsetArr[i].z}; 
-                const size_t offsetCt{3};
+            // Create a multidimensional vector to access for the for loop
+            std::array<std::array<uint16_t, 3>, MAX_OFFSET_VECTOR_COUNT> values{};
 
-                for (int j = 0; j < offsetCt; j++){
-                    if (this->_appendedOffsets.contains({i,j})) {
-                        if (singlePktOffset[j] != SensorUtils::UNUSED_OFFSETS) {
-                            // If we are getting data for something we didn't register in the offsets,
-                            // the arguments or the packet are incorrect. This is likely the argument 
-                            _status = ESP_ERR_INVALID_ARG;
-                            return ESP_ERR_INVALID_ARG;
-                        }
+            for (size_t i = 0; i < offsetArr.size(); i++) {
+                // Get the vector into a set of 3 for each row of the array
+                values[i] = {offsetArr[i].x, offsetArr[i].y, offsetArr[i].z};
+            }
 
-                        (this->_appendedOffsets.at({i,j}))
-                    }
+            for (auto& [name, offset] : _appendedOffsets) {
+                const uint16_t offsetValue = values[offset.packetSection][offset.component];
+
+                if (offsetValue != SensorUtils::UNUSED_OFFSETS) {
+                    offset.value = offsetValue;
                 }
             }
 
             // Change the memory registry for the sensor offsets
             // Return the success
-            return this->setSensorOffsets();
+            return this->setHardwareOffsets();
         }
 
         // Read function setter
@@ -541,52 +537,85 @@ class Sensor : public RS485InterfaceSensor {
             }
         }
 
-        esp_err_t setSensorOffsets() {
+        esp_err_t setHardwareOffsets() {
 
             if (_offsetMemReg == SensorUtils::UNUSED_OFFSET_REG) {
                 _status = SensorUtils::SENSOR_ERR_ARG;
                 return _status;
             }
 
-            if (
-                _offsets.x != SensorUtils::UNUSED_OFFSETS &&
-                _offsets.y != SensorUtils::UNUSED_OFFSETS &&
-                _offsets.z != SensorUtils::UNUSED_OFFSETS
-            ) {
                 if (_sensorCommBusI2C.getMutex() == nullptr) {
                     _status = SensorUtils::SENSOR_ERR_IO;
                     return _status;
                 }
 
-                LockGuard lock(this->_sensorCommBusI2C.getMutex());
-                if (!lock.isMutexLocked()) {
-                    confirmStatus(ESP_ERR_INVALID_STATE);
-                    return ESP_ERR_INVALID_STATE;
+            LockGuard lock(this->_sensorCommBusI2C.getMutex());
+            if (!lock.isMutexLocked()) {
+                confirmStatus(ESP_ERR_INVALID_STATE);
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            // Select the mux channel
+            const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName(), lock);
+
+            confirmStatus(muxStatus);
+
+            if (muxStatus != ESP_OK) {
+                return muxStatus;
+            }
+
+            esp_err_t writeStatus{};
+            using OffsetLayout = SensorUtils::OffsetLayout;
+
+            // Iterate through each offset stored in the map
+            for (auto& [name, offset] : _appendedOffsets) {
+                switch (offset.layout) {
+                    case (OffsetLayout::REG_8_BIT):
+                        if (offset.value > 0xFF) {
+                            return ESP_ERR_INVALID_ARG;
+                        }
+
+                        writeStatus = writeDeviceRegister(
+                            offset.memoryRegistry,
+                            static_cast<uint8_t>(offset.value),
+                            lock
+                        );
+                    break;
+
+                    case (OffsetLayout::REG_16_BIT_HIGH_FIRST):
+                    case (OffsetLayout::REG_16_BIT_LOW_FIRST): {
+
+                        if (offset.memoryRegistry == 0xFF) {
+                            return ESP_ERR_INVALID_ARG;
+                        }
+
+                        const uint8_t low = static_cast<uint8_t>(offset.value & 0xFF);
+                        const uint8_t high = static_cast<uint8_t>(offset.value >> 8);
+
+                        const uint8_t buffer[2] = {
+                            (offset.layout == OffsetLayout::REG_16_BIT_HIGH_FIRST) ? high : low,
+                            (offset.layout == OffsetLayout::REG_16_BIT_HIGH_FIRST) ? low : high
+                        };
+
+                        writeStatus = _sensorCommBusI2C.writeArrayRegister(
+                            this->getName(),
+                            offset.memoryRegistry,
+                            buffer,
+                            lock
+                        );
+                        break;
+                    }
+                    default:
+                        return ESP_ERR_INVALID_ARG;
+                    break;
                 }
 
-                // Select the mux channel
-                const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName(), lock);
-
-                confirmStatus(muxStatus);
-
-                if (muxStatus != ESP_OK) {
-                    return muxStatus;
+                // After each loop occurance, check the write success
+                // and return it if there is an error
+                confirmStatus(writeStatus);
+                if (writeStatus != ESP_OK) {
+                    return writeStatus;
                 }
-
-                // Create the write buffer for the offsets
-                uint8_t offsetWriteBuf[6]{};
-                SensorUtils::convertOffsetsToArr(offsetWriteBuf, _offsets);
-
-                // Write the buffer
-                esp_err_t status = _sensorCommBusI2C.writeArrayRegister(
-                    this->getName(),
-                    _offsetMemReg,
-                    offsetWriteBuf,
-                    lock
-                );
-
-                confirmStatus(status);
-                return status;
             }
 
             return ESP_OK;

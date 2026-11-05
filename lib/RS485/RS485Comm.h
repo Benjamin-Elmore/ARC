@@ -144,7 +144,6 @@ public:
 
         printf("\n=== SERIAL STATUS ===\n");
         printf("_status: %s (%" PRId32 ")\n", esp_err_to_name(_status), static_cast<int32_t>(_status));
-        printf("_isFirstRead: %s\n", _isFirstRead ? "true" : "false");
         printf("_validPacket: %s\n", _validPacket ? "true" : "false");
         printf("_currentPacketState: %s (%d)\n", stateName, static_cast<int>(_currentPacketState));
         printf("_packetLength: %u body bytes\n", static_cast<unsigned int>(_packetLength));
@@ -179,7 +178,6 @@ private:
     uint8_t _lastReadBytes[DEFAULT_COMM_RX_BUFF]{};
 
     // PACKET PARSING STATES, reset with resetParsing()
-    bool _isFirstRead{true};
     RS485Utils::ParseState _currentPacketState{RS485Utils::ParseState::WAITING_FOR_HEADER};
     size_t _currentPacketIndex{};
     uint16_t _dataLastIndex{};
@@ -367,42 +365,44 @@ private:
         }
 
 
-        if (this->_isFirstRead) {
-            // Loop through the entire set of sensors
-            for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
-                // Check if the map contains the sensor ID
-                if (_registryMap.contains(_sensorIDS[i])) {
-                    //Add the offsets to a vector and pass it to set offsets
+        // if (this->_isFirstRead) {
+        //     // Loop through the entire set of sensors
+        //     for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
+        //         // Check if the map contains the sensor ID
+        //         if (_registryMap.contains(_sensorIDS[i])) {
+        //             //Add the offsets to a vector and pass it to set offsets
 
-                    // Base index for each iteration
-                    const size_t base = INDEX_SENSOR_DATA + 6 * i;
-                    const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
+        //             // Base index for each iteration
+        //             const size_t base = INDEX_SENSOR_DATA + 6 * i;
+        //             const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
 
-                    if (base + 6 > bodyEnd) {
-                        // Current offsets extend outside of slots
-                        return false;
-                    }
+        //             if (base + 6 > bodyEnd) {
+        //                 // Current offsets extend outside of slots
+        //                 return false;
+        //             }
 
-                    // Write the offsets
-                    Vec3<uint16_t> offsets{
-                        RS485Utils::convertU16InArr(_packet, base),
-                        RS485Utils::convertU16InArr(_packet, base + 2),
-                        RS485Utils::convertU16InArr(_packet, base + 4)
-                    };
+        //             // Write the offsets
+        //             std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsets{};
+        //            for (auto& entry : offsets) { entry = {0xFFFF, 0xFFFF, 0xFFFF}; }
+        //            offsets[0] = Vec3<uint16_t>{
+        //                 RS485Utils::convertU16InArr(_packet, base),
+        //                 RS485Utils::convertU16InArr(_packet, base + 2),
+        //                 RS485Utils::convertU16InArr(_packet, base + 4)
+        //             };
 
-                    // Set the offsets, record the result
-                    esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
+        //             // Set the offsets, record the result
+        //             esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
 
-                    if (result != ESP_OK) {
-                        // Throw an error, we could not set the offsets
-                        return false;
-                    }
-                }
-            }
+        //             if (result != ESP_OK) {
+        //                 // Throw an error, we could not set the offsets
+        //                 return false;
+        //             }
+        //         }
+        //     }
 
-            // Finished the offset setting for the first read.
-            _isFirstRead = false;
-        }
+            // // Finished the offset setting for the first read.
+            // _isFirstRead = false;
+        // }
 
         return true;
     }
@@ -619,3 +619,5 @@ private:
 };
 
 #include "RS485CommParser.h"
+
+
