@@ -100,9 +100,13 @@ namespace SensorUtils {
         std::string_view name;
         uint16_t value;
         uint8_t memoryRegistry;
+        uint8_t packetSection; // Index into the packet's offset vectors.
+        uint8_t component;     // 0 = x, 1 = y, 2 = z.
 
-        AppendedOffset(std::string_view name, uint16_t value, uint8_t memoryRegistry) :
-            name(name), value(value), memoryRegistry(memoryRegistry) {};
+        AppendedOffset(std::string_view name, uint16_t value, uint8_t memoryRegistry,
+                       uint8_t packetSection, uint8_t component) :
+            name(name), value(value), memoryRegistry(memoryRegistry),
+            packetSection(packetSection), component(component) {}
     };
 
     inline void convertOffsetsToArr(

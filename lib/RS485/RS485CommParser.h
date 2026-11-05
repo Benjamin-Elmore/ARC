@@ -90,10 +90,16 @@ inline bool RS485Comm::parseResetEnd() {
 
             // Set the pending offsets within the array
             _pendingOffsets[i][_currentOffsetSection] = values;
+
+            std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsetSet{};
+
+            for (int j = 0; j < MAX_OFFSET_VECTOR_COUNT; j++){
+                offsetSet[j] = *_pendingOffsets[i][j];
+            }
+
+            this->_registryMap.at(i)->setOffsets(offsetSet);
         }
     }
-
-    
 
     return true;
 }

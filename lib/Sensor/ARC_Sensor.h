@@ -124,7 +124,8 @@ class Sensor : public RS485InterfaceSensor {
                 this->appendVariable(variable.variableName, variable.variable);
             }
             for (const SensorUtils::AppendedOffset& offset : appendedOffsets) {
-                this->appendMethod(method.methodName, method.method);
+                this->appendOffset(offset.name, offset.value, offset.memoryRegistry,
+                                   offset.packetSection, offset.component);
             }
 
             if (sensorReadFunction != NULL) {
@@ -288,10 +289,16 @@ class Sensor : public RS485InterfaceSensor {
             this->_appendedMethods.emplace(functionName, function);
         }
 
-        void appendOffset(std::string_view offsetName, uint16_t offset, uint8_t memRegistry) {
-            // Append a variable to the hash table
+        void appendOffset(
+            std::string_view offsetName, uint16_t offset, uint8_t memRegistry,
+            uint8_t packetSection, uint8_t component
+        ) {
 
-            if (_appendedOffsets.contains(offsetName)) {
+            if (
+                packetSection >= MAX_OFFSET_VECTOR_COUNT ||
+                component >= 3 ||
+                _appendedOffsets.contains(offsetName)
+            ) {
                 _status = SensorUtils::SENSOR_ERR_ARG;
                 return;
             }
@@ -301,7 +308,13 @@ class Sensor : public RS485InterfaceSensor {
                 return;
             }
             
-            SensorUtils::AppendedOffset newOffset(offsetName, offset, memRegistry);
+            SensorUtils::AppendedOffset newOffset(
+                offsetName,
+                offset,
+                memRegistry,
+                packetSection,
+                component
+            );
 
             this->_appendedOffsets.emplace(offsetName, newOffset);
         }
@@ -427,10 +440,27 @@ class Sensor : public RS485InterfaceSensor {
         }
 
         // OFFSET SETTER
-        esp_err_t setOffsets(Vec3<uint16_t> o) override {
-            this->_offsets.x = o.x;
-            this->_offsets.y = o.y;
-            this->_offsets.z = o.z;
+        esp_err_t setOffsets(std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsetArr) override {
+            // Basic offsets
+
+            for (int i = 0; i < offsetArr.size(); i++){
+                // set up the vector of offsets
+                const uint16_t singlePktOffset[3] = {offsetArr[i].x, offsetArr[i].y, offsetArr[i].z}; 
+                const size_t offsetCt{3};
+
+                for (int j = 0; j < offsetCt; j++){
+                    if (this->_appendedOffsets.contains({i,j})) {
+                        if (singlePktOffset[j] != SensorUtils::UNUSED_OFFSETS) {
+                            // If we are getting data for something we didn't register in the offsets,
+                            // the arguments or the packet are incorrect. This is likely the argument 
+                            _status = ESP_ERR_INVALID_ARG;
+                            return ESP_ERR_INVALID_ARG;
+                        }
+
+                        (this->_appendedOffsets.at({i,j}))
+                    }
+                }
+            }
 
             // Change the memory registry for the sensor offsets
             // Return the success
