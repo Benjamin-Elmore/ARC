@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <optional>
 #include <string_view>
 #include <cstdio>
 #include <cinttypes>
@@ -207,121 +208,18 @@ private:
     bool parseReboot();
     bool parseFailure();
 
-    size_t compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
-        packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
+    void addTimeData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    void addSensorIDs(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    void addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], uint8_t length);
 
-        //NOTE: We wait to add the length until the end with the full packet
-        
-        // TIME OF SENDING AND TIME SINCE RECEIVE
-        const uint32_t timeNow = esp_timer_get_time();
-
-        const uint32_t timeSinceReceive = static_cast<uint32_t>(timeNow - _receivedTime);
-        const uint32_t timeSending = static_cast<uint32_t>(timeNow);
-
-        RS485Utils::writeU32ToArr(packet, INDEX_TIME_SINCE_LAST_RECEIVE, timeSinceReceive);
-        RS485Utils::writeU32ToArr(packet, INDEX_TIME_SENT, timeSending);
-
-        // SENSOR IDS
-        // Sensor IDS will always be even since 2 * MAX_SENSOR IDS is always even
-        for (int i = 0; i < SENSOR_ID_SECTION_BYTECOUNT; i++) {
-            // Get even and odd id
-            uint8_t first = _registryMap.contains(_sensorIDS[2 * i]) ? _sensorIDS[2 * i] : 0;
-            uint8_t second = _registryMap.contains(_sensorIDS[2 * i + 1]) ? _sensorIDS[2 * i + 1] : 0;
-
-            // Place as a compacted byte at target index
-            packet[INDEX_SENSOR_IDS + i] = static_cast<uint8_t>((first << 4) | (second & 0xF));
-        }
-
-        // DATA
-        // The index we need will need to be reduced based on how many sensors we are sending.
-        // We include the data here.
-
-        // Loop invariant that controls the length based on the size
-        // (invariant += 6) each time we add data to the variable data section
-        uint8_t packetLengthInvariant{PACKET_LENGTH_MIN};
-
-        for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
-            // Each sensor portion uses 6 positions in the packet, so for each iteration
-            // (6 * i + INDEX_SENSOR_DATA) gives you the first position of where to place the first
-            // byte.
-
-            if (_sensorIDS[i] == 0) {
-                continue;
-            }
-
-            packetLengthInvariant = PACKET_LENGTH_MIN + 6 * (i + 1);
-
-            if(_registryMap.contains(_sensorIDS[i])) {
-                Vec3<uint16_t> reading{}; 
-                const bool validResult = (_registryMap.at(_sensorIDS[i]))->getReadings(reading);
-
-                if (!validResult) {
-                    reading.x = 0xFFFF;
-                    reading.y = 0xFFFF;
-                    reading.z = 0xFFFF;
-                }
-
-                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, reading.x);
-                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, reading.y);
-                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, reading.z);
-            } else {
-                
-            }
-        }
-
-        // LENGTH
-        // The invariant is now equal to the minimum length + our variable data
-        // We can now write the length in the packet
-        RS485Utils::writeU16ToArr(packet, INDEX_PACKET_LENGTH, packetLengthInvariant);
-        
-        // FIRST ESCAPE SEQUENCE
-        // Index found by taking the starting index where the length is measured, and adding the length invariant
-        // we found.
-        RS485Utils::writeU32ToArr(
-            packet,
-            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant,
-            BINARY_ESCAPE_SEQUENCE
-        );
-
-        // CHECKSUM
-        RS485Utils::writeU32ToArr(
-            packet,
-            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 4,
-            this->calculateChecksum(packet, packetLengthInvariant)
-        );
-
-        // SECOND ESCAPE SEQUENCE
-        RS485Utils::writeU32ToArr(
-            packet,
-            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 8,
-            BINARY_ESCAPE_SEQUENCE
-        );
-
-        // Return the size of the packet
-        return NON_LENGTH_BYTECOUNT + packetLengthInvariant + 3 * ESCAPE_SEQUENCE_BYTECOUNT;
-    }
-
-    void sendData(){
-        // Send a responding data packet based on a validated packet received
-        // from the V5 
-
-        uint8_t sendingPacket[DEFAULT_MAX_PAYLOAD]{};
-
-        // Compile the packet, get its actual length, not sizeof(sendingPacket)
-        size_t packetSize = this->compileSentPacket(sendingPacket);
-
-        int bytesWritten = uart_write_bytes(
-            UART_NUM_1,
-            sendingPacket,
-            packetSize
-        );
-
-        if (bytesWritten != static_cast<int>(packetSize)) {
-            this->_status = ESP_ERR_INVALID_STATE;
-        }
-
-        return;
-    }
+    // PACKET COMPILER FUNCTIONS
+    size_t compilePkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t compileResetStartData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t compileResetContinueData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t compileResetEndData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t compileRebootData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t compileFailureData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs
@@ -348,11 +246,13 @@ private:
         }
     }
 
-    bool extractData(){
-        // Extract data from our checked packet
+    bool handleResponse(){
+        // Extract data from our checked packet and send a response
 
         // Packet Header, determining what packet we received
-        this->_packetHeader = _packet[0];
+        // Its shifted by 2 since the last 2 bits are irrelevant for determination
+        // 6 bits needed for id, so shift by 2
+        this->_packetHeader = (_packet[0] >> 2);
 
         // Time Data
         this->_timeSinceLastReceive = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SINCE_LAST_RECEIVE);
@@ -360,49 +260,16 @@ private:
         
         this->calculateSensorIDs();
 
-        if (_packetHeader == BINARY_COMM_RESET_START) {
-            this->parseResetStart();
+        uint8_t packet[DEFAULT_MAX_PAYLOAD]{};
+        const size_t packetSize = compilePkt(packet);
+        if (packetSize == 0) {
+            return false;
         }
 
-
-        // if (this->_isFirstRead) {
-        //     // Loop through the entire set of sensors
-        //     for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
-        //         // Check if the map contains the sensor ID
-        //         if (_registryMap.contains(_sensorIDS[i])) {
-        //             //Add the offsets to a vector and pass it to set offsets
-
-        //             // Base index for each iteration
-        //             const size_t base = INDEX_SENSOR_DATA + 6 * i;
-        //             const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
-
-        //             if (base + 6 > bodyEnd) {
-        //                 // Current offsets extend outside of slots
-        //                 return false;
-        //             }
-
-        //             // Write the offsets
-        //             std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsets{};
-        //            for (auto& entry : offsets) { entry = {0xFFFF, 0xFFFF, 0xFFFF}; }
-        //            offsets[0] = Vec3<uint16_t>{
-        //                 RS485Utils::convertU16InArr(_packet, base),
-        //                 RS485Utils::convertU16InArr(_packet, base + 2),
-        //                 RS485Utils::convertU16InArr(_packet, base + 4)
-        //             };
-
-        //             // Set the offsets, record the result
-        //             esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
-
-        //             if (result != ESP_OK) {
-        //                 // Throw an error, we could not set the offsets
-        //                 return false;
-        //             }
-        //         }
-        //     }
-
-            // // Finished the offset setting for the first read.
-            // _isFirstRead = false;
-        // }
+        const int bytesWritten = uart_write_bytes(RS485_COMM_UART, packet, packetSize);
+        if (bytesWritten != static_cast<int>(packetSize)) {
+            _status = ESP_ERR_INVALID_STATE;
+        }
 
         return true;
     }
@@ -543,7 +410,7 @@ private:
 
                     // Pull the data, packet will be valid if offsets can be written,
                     // and data can be extracted
-                    _validPacket = this->extractData();
+                    _validPacket = this->handleResponse();
 
                     if (_validPacket) { 
                         _receivedTime = esp_timer_get_time();
@@ -580,10 +447,6 @@ private:
                 // UART read bytes, and we will parse them and send the requested data
                 for (int i = 0; i < received; i++) {
                     this->parseByte(this->_lastReadBytes[i]);
-                    if (this->_validPacket) {
-                        this->_validPacket = false;
-                        this->sendData();
-                    }
                 }
             }
 
@@ -619,5 +482,4 @@ private:
 };
 
 #include "RS485CommParser.h"
-
-
+#include "RS485PacketComp.h"

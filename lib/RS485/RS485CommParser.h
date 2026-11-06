@@ -4,7 +4,22 @@
 #include "SensorUtils.h"
 
 inline bool RS485Comm::parseRead() {
-    //TODO: Add parser logic
+
+    const size_t idCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
+
+    for (uint8_t i = 0; i < idCount; i++) {
+        // Loop through and make a validation check against sensorIDs and what
+        // RS485Comm has
+        if (_sensorIDS[i] == 0){
+            continue;
+        }
+
+        if (!(_registryMap.contains(_sensorIDS[i]))) {
+            // A sensor ID was requested that does not exist
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -85,6 +100,7 @@ inline bool RS485Comm::parseResetEnd() {
             };
 
             if (_currentOffsetSection > MAX_OFFSET_VECTOR_COUNT) {
+                // We overshot our maximum
                 return false;
             }
 
@@ -97,6 +113,8 @@ inline bool RS485Comm::parseResetEnd() {
                 offsetSet[j] = *_pendingOffsets[i][j];
             }
 
+            // We have reached the end of the offsets for this sensor, give it over to
+            // the sensor
             this->_registryMap.at(i)->setOffsets(offsetSet);
         }
     }
@@ -105,11 +123,11 @@ inline bool RS485Comm::parseResetEnd() {
 }
 
 inline bool RS485Comm::parseReboot() {
-    //TODO: Add parser logic
-    return true;
+
+    return false;
 }
 
 inline bool RS485Comm::parseFailure() {
     //TODO: Add parser logic
-    return true;
+    return false;
 }

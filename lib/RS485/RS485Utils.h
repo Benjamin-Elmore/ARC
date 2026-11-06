@@ -59,18 +59,28 @@
 
 namespace RS485Utils {
 
-    constexpr std::array<std::uint8_t, 6> PacketHeaders = {
-        BINARY_COMM_READ,
-        BINARY_COMM_RESET_START,
-        BINARY_COMM_RESET_CONT,
-        BINARY_COMM_RESET_END,
-        BINARY_COMM_REBOOT,
-        BINARY_COMM_FAILURE
+    enum class PacketType : std::uint8_t {
+        Read          = BINARY_COMM_READ,
+        ResetStart    = BINARY_COMM_RESET_START,
+        ResetContinue = BINARY_COMM_RESET_CONT,
+        ResetEnd      = BINARY_COMM_RESET_END,
+        Reboot        = BINARY_COMM_REBOOT,
+        Failure       = BINARY_COMM_FAILURE
     };
 
-    bool isValidHeader(std::uint8_t header) {
-        return std::find(PacketHeaders.begin(), PacketHeaders.end(), header)
-            != PacketHeaders.end();
+    inline bool isValidHeader(std::uint8_t header) {
+        switch (static_cast<PacketType>(header)) {
+            case PacketType::Read:
+            case PacketType::ResetStart:
+            case PacketType::ResetContinue:
+            case PacketType::ResetEnd:
+            case PacketType::Reboot:
+            case PacketType::Failure:
+                return true;
+
+            default:
+                return false;
+        }
     }
 
     enum ParseState {
