@@ -215,7 +215,6 @@ private:
     // PACKET COMPILER FUNCTIONS
     size_t sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader);
     size_t compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
-    size_t compileRebootData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs

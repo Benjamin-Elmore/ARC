@@ -19,4 +19,5 @@ class RS485InterfaceSensor {
         virtual bool setSensorType(SensorUtils::SensorConfig preconfig) = 0;
 
         virtual esp_err_t setOffsets(std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsetArr) = 0;
+        virtual esp_err_t reboot() = 0;
 };

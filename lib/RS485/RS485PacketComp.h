@@ -56,6 +56,9 @@ inline void RS485Comm::addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], u
 inline size_t RS485Comm::sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader) {
     //NOTE: We wait to add the length and header until the end with the full packet
     
+    // HEADER
+    packet[0] = (packetHeader << 2) | 0b0010;
+
     // TIME
     this->addTimeData(packet);
 
@@ -64,22 +67,34 @@ inline size_t RS485Comm::sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const u
 
     // DATA
     // Each compiler returns the body length, or zero when no response is available.
+    // NOTE: Resets, Failure, Reboot all do not pass through data, only parsing
     size_t packetLengthInvariant{PACKET_LENGTH_MIN};
     switch (static_cast<RS485Utils::PacketType>(packetHeader)) {
         case RS485Utils::PacketType::Read:
             if (!parseRead()) { return 0; }
             packetLengthInvariant = compileReadData(packet);
             break;
-
         case RS485Utils::PacketType::ResetStart:
-        case RS485Utils::PacketType::ResetContinue:
-        case RS485Utils::PacketType::ResetEnd:
-        case RS485Utils::PacketType::Failure:
+            // NO DATA
+            if (!parseResetStart()) { return 0; }
             break;
-
+        case RS485Utils::PacketType::ResetContinue:
+            // NO DATA
+            if (!parseResetContinue()) { return 0; }
+            break;
+        case RS485Utils::PacketType::ResetEnd:
+            // NO DATA
+            if (!parseResetEnd()) { return 0; }
+            break;
+        case RS485Utils::PacketType::Failure:
+            // NO DATA
+            // NOTE: Parser not needed, we are simply asking for a reboot on the next packet
+            // All offsets are overwritten in the resend
+            break;
         case RS485Utils::PacketType::Reboot:
+            // The parser resets the sensors, but no data is sent
+            // Reiterate sensors being reset
             if (!parseReboot()) { return 0; }
-            packetLengthInvariant = compileRebootData(packet);
             break;
 
         default:
@@ -141,9 +156,4 @@ inline size_t RS485Comm::compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD])
         }
     }
     return packetLengthInvariant;
-}
-
-inline size_t RS485Comm::compileRebootData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
-    // TODO: Define the response format for this packet type.
-    return 0;
 }

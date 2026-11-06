@@ -24,7 +24,7 @@ inline bool RS485Comm::parseRead() {
 }
 
 inline bool RS485Comm::parseResetStart() {
-
+    // Set the ID type, then get offsets
     const uint16_t idCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
 
     for (int i = 0; i < idCount; i++) {
@@ -49,7 +49,7 @@ inline bool RS485Comm::parseResetStart() {
 }
 
 inline bool RS485Comm::parseResetContinue() {
-
+    // Keep building the offsets
     const uint16_t idCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
 
     for (int i = 0; i < idCount; i++) {
@@ -82,7 +82,7 @@ inline bool RS485Comm::parseResetContinue() {
 }
 
 inline bool RS485Comm::parseResetEnd() {
-
+    // Wrap up the reset and set the offsets given
     const uint16_t idCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
 
     for (int i = 0; i < idCount; i++) {
@@ -123,6 +123,22 @@ inline bool RS485Comm::parseResetEnd() {
 }
 
 inline bool RS485Comm::parseReboot() {
+    // Reboot the sensors registered to the comm
+    const uint16_t idCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
 
-    return false;
+    for (int i = 0; i < idCount; i++) {
+        if (_sensorIDS[i] == 0) {
+            continue;
+        }
+
+        if (this->_registryMap.contains(i)) {
+            esp_err_t rebootStatus = this->_registryMap.at(i)->reboot();
+
+            if (rebootStatus != ESP_OK) {
+                return false;
+            }
+        }       
+    }
+
+    return true;
 }
