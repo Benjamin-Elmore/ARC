@@ -213,13 +213,9 @@ private:
     void addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], uint8_t length);
 
     // PACKET COMPILER FUNCTIONS
-    size_t compilePkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    size_t sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader);
     size_t compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
-    size_t compileResetStartData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
-    size_t compileResetContinueData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
-    size_t compileResetEndData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
     size_t compileRebootData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
-    size_t compileFailureData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs
@@ -261,7 +257,7 @@ private:
         this->calculateSensorIDs();
 
         uint8_t packet[DEFAULT_MAX_PAYLOAD]{};
-        const size_t packetSize = compilePkt(packet);
+        const size_t packetSize = sendPkt(packet, _packetHeader);
         if (packetSize == 0) {
             return false;
         }
@@ -313,6 +309,15 @@ private:
         _dataLastIndex = 0;
     }
 
+    void setFaultyIDS() {
+        // Set IDS to 0xFF so that sensor read runs
+        const size_t IdSize = 2 * SENSOR_ID_SECTION_BYTECOUNT;
+
+        for (size_t i = 0; i < IdSize; i++) {
+            _sensorIDS[i] = 0xFF;
+        }
+    }
+
     void parseByte(uint8_t byte){
         switch (_currentPacketState)
         {
@@ -337,15 +342,7 @@ private:
                 _packetLength = static_cast<uint16_t>(_packet[1] << 8) |
                                 static_cast<uint16_t>(_packet[2]);
                 _dataLastIndex = NON_LENGTH_BYTECOUNT + _packetLength - 1;
-
-                if (this->invalidPacketLength()) {
-                    this->resetParsing();
-                    break;
-                } else {
-                    this->_currentPacketState = RS485Utils::ParseState::BODY;
-                    _currentPacketIndex++;
-                    break;
-                }
+                this->_currentPacketState = RS485Utils::ParseState::BODY;
             }
             
             // Increment the current packet index
@@ -394,6 +391,8 @@ private:
                     _currentPacketIndex++;
                 } else {
                     // The checksum failed, we need to reset for the next packet
+                    this->setFaultyIDS();
+                    this->handleResponse();
                     this->resetParsing();
                 }
             } else {
@@ -410,6 +409,13 @@ private:
 
                     // Pull the data, packet will be valid if offsets can be written,
                     // and data can be extracted
+
+                    uint8_t packetResponse = static_cast<uint8_t>(_packetHeader);
+
+                    if (!validateChecksum()) {
+                        setFaultyIDS();
+                    }
+
                     _validPacket = this->handleResponse();
 
                     if (_validPacket) { 
@@ -420,6 +426,8 @@ private:
                 }
                 
                 // Reset the parser for a clean slate
+                this->setFaultyIDS();
+                this->handleResponse();
                 this->resetParsing();
             } else {
                 // Not at the desired last index for the checksum, continue

@@ -126,8 +126,3 @@ inline bool RS485Comm::parseReboot() {
 
     return false;
 }
-
-inline bool RS485Comm::parseFailure() {
-    //TODO: Add parser logic
-    return false;
-}

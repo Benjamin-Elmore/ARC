@@ -53,10 +53,8 @@ inline void RS485Comm::addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], u
     );
 }
 
-inline size_t RS485Comm::compilePkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
-    packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
-
-    //NOTE: We wait to add the length until the end with the full packet
+inline size_t RS485Comm::sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader) {
+    //NOTE: We wait to add the length and header until the end with the full packet
     
     // TIME
     this->addTimeData(packet);
@@ -66,26 +64,17 @@ inline size_t RS485Comm::compilePkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
 
     // DATA
     // Each compiler returns the body length, or zero when no response is available.
-    size_t packetLengthInvariant{};
-    switch (static_cast<RS485Utils::PacketType>(_packetHeader)) {
+    size_t packetLengthInvariant{PACKET_LENGTH_MIN};
+    switch (static_cast<RS485Utils::PacketType>(packetHeader)) {
         case RS485Utils::PacketType::Read:
             if (!parseRead()) { return 0; }
             packetLengthInvariant = compileReadData(packet);
             break;
 
         case RS485Utils::PacketType::ResetStart:
-            if (!parseResetStart()) { return 0; }
-            packetLengthInvariant = compileResetStartData(packet);
-            break;
-
         case RS485Utils::PacketType::ResetContinue:
-            if (!parseResetContinue()) { return 0; }
-            packetLengthInvariant = compileResetContinueData(packet);
-            break;
-
         case RS485Utils::PacketType::ResetEnd:
-            if (!parseResetEnd()) { return 0; }
-            packetLengthInvariant = compileResetEndData(packet);
+        case RS485Utils::PacketType::Failure:
             break;
 
         case RS485Utils::PacketType::Reboot:
@@ -93,10 +82,8 @@ inline size_t RS485Comm::compilePkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
             packetLengthInvariant = compileRebootData(packet);
             break;
 
-        case RS485Utils::PacketType::Failure:
-            if (!parseFailure()) { return 0; }
-            packetLengthInvariant = compileFailureData(packet);
-            break;
+        default:
+            return 0;
     }
 
     if (packetLengthInvariant == 0) {
@@ -129,6 +116,15 @@ inline size_t RS485Comm::compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD])
 
         packetLengthInvariant = PACKET_LENGTH_MIN + 6 * (i + 1);
 
+        if (_sensorIDS[i] == 0xFF) {
+            // There was an error with the sensors, and we are passing through
+            // Error data
+            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, 0xFF);
+            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, 0xFF);
+            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, 0xFF);
+            continue;
+        }
+
         if(_registryMap.contains(_sensorIDS[i])) {
             Vec3<uint16_t> reading{}; 
             const bool validResult = (_registryMap.at(_sensorIDS[i]))->getReadings(reading);
@@ -147,27 +143,7 @@ inline size_t RS485Comm::compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD])
     return packetLengthInvariant;
 }
 
-inline size_t RS485Comm::compileResetStartData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
-    // TODO: Define the response format for this packet type.
-    return 0;
-}
-
-inline size_t RS485Comm::compileResetContinueData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
-    // TODO: Define the response format for this packet type.
-    return 0;
-}
-
-inline size_t RS485Comm::compileResetEndData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
-    // TODO: Define the response format for this packet type.
-    return 0;
-}
-
 inline size_t RS485Comm::compileRebootData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
-    // TODO: Define the response format for this packet type.
-    return 0;
-}
-
-inline size_t RS485Comm::compileFailureData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]) {
     // TODO: Define the response format for this packet type.
     return 0;
 }
