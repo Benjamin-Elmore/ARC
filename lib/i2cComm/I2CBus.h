@@ -131,11 +131,10 @@ public:
 
             this->_muxCurrentChannels.at(i) = 0xF;
 
-            i2c_device_config_t muxConfig = {
-                .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-                .device_address = _muxAddresses.at(i),
-                .scl_speed_hz = 10000,
-            };
+            i2c_device_config_t muxConfig{};
+            muxConfig.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+            muxConfig.device_address = _muxAddresses.at(i);
+            muxConfig.scl_speed_hz = 10000;
 
             // Add mux to the bus
             if (!this->confirmStatus(i2c_master_bus_add_device(this->_busHandle, &muxConfig, &this->_muxHandles.at(i)), "setupI2CBus: add mux device")) {
@@ -212,11 +211,10 @@ public:
 
         // Add the new sensor, sensorHandle will be added after config is completed
         
-        i2c_device_config_t sensorConfig = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = i2cAddress,
-            .scl_speed_hz = 100000,
-        };
+        i2c_device_config_t sensorConfig{};
+        sensorConfig.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        sensorConfig.device_address = i2cAddress;
+        sensorConfig.scl_speed_hz = 100000;
 
         esp_err_t addConfigStatus = i2c_master_bus_add_device(
             this->_busHandle,                                   // Bus handle

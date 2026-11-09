@@ -2,6 +2,7 @@
 #include "Logging/SdLogger.h"
 #include "esp_log.h"
 #include "ARC_Sensor.h"
+#include "SensorOffsetConfig.h"
 
 namespace {
     constexpr const char* TAG = "ARC";
@@ -23,12 +24,7 @@ extern "C" void app_main(void)
     static Sensor<0> offsetSensor(
         "otos", offsetBus, 0x17, 1, true,
         SensorUtils::SensorConfig::NONE, SensorUtils::UNUSED_MUX,
-        DEFAULT_PRIORITY, {}, {}, {}, {},
-        {
-            {"offset-x", 0, 0x10, 0, 0, SensorUtils::OffsetLayout::REG_16_BIT_LOW_FIRST},
-            {"offset-y", 0, 0x12, 0, 1, SensorUtils::OffsetLayout::REG_16_BIT_LOW_FIRST},
-            {"offset-h", 0, 0x14, 0, 2, SensorUtils::OffsetLayout::REG_16_BIT_LOW_FIRST}
-        },
+        DEFAULT_PRIORITY, {}, {}, {}, {}, {},
         +[](Sensor<0>& sensor, LockGuard& lock) {
             uint8_t data[6]{};
             if (sensor.readDeviceRegister(0x20, data, sizeof(data), lock) != ESP_OK) {
@@ -41,6 +37,8 @@ extern "C" void app_main(void)
             sensor.setReadings({u16(data), u16(data + 2), u16(data + 4)});
         }, 0x10
     );
+    SensorOffsetConfig::addOffsets(offsetSensor, SensorUtils::SensorConfig::OPTICAL);
+
     RS485ARSENAL::BaseRS485Instance = &comm25;
     if (offsetSensor.setup() != SensorUtils::SENSOR_OK) {
         ESP_LOGE(TAG, "OTOS setup failed");

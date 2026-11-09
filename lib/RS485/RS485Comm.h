@@ -183,6 +183,8 @@ private:
     size_t _currentPacketIndex{};
     uint16_t _dataLastIndex{};
     bool _validPacket{false};
+    bool _discardUntilIdle{false};
+    size_t _frameSize{};
 
     // PACKET DATA, persistent for a complete packet
     uint8_t _packet[DEFAULT_MAX_PAYLOAD]{};
@@ -318,6 +320,11 @@ private:
     }
 
     void parseByte(uint8_t byte){
+
+        if (_discardUntilIdle) {
+            return;
+        }
+
         switch (_currentPacketState)
         {
         case RS485Utils::ParseState::WAITING_FOR_HEADER:
@@ -327,9 +334,8 @@ private:
                 this->_currentPacketIndex = 1; // Next _currentPacketIndex
                 _currentPacketState = RS485Utils::ParseState::LENGTH;
                 return; // This bit is done
-            } else {
-                _validPacket = false;
             }
+
             break;
         
         case RS485Utils::ParseState::LENGTH:
@@ -340,7 +346,18 @@ private:
                 // New packet length
                 _packetLength = static_cast<uint16_t>(_packet[1] << 8) |
                                 static_cast<uint16_t>(_packet[2]);
+
                 _dataLastIndex = NON_LENGTH_BYTECOUNT + _packetLength - 1;
+                _frameSize = NON_LENGTH_BYTECOUNT + size_t(_packetLength);
+                _frameSize += 3 * ESCAPE_SEQUENCE_BYTECOUNT;
+
+                if (_frameSize > sizeof(_packet)) {
+                    _validPacket = false;
+                    _discardUntilIdle = true;
+                    this->resetParsing();
+                    break;
+                }
+
                 this->_currentPacketState = RS485Utils::ParseState::BODY;
             }
             
@@ -352,13 +369,14 @@ private:
         case RS485Utils::ParseState::BODY:
             // Check if we are still within the index
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex == (this->_dataLastIndex)) {
+            if (_currentPacketIndex >= (this->_dataLastIndex)) {
                 // This is the last bit, move on to the next part of the packet
                 this->_currentPacketState = RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE;
             }
             
             // Increment the index, the escape sequence is next
             _currentPacketIndex++;
+
             break;
         
         case RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE:
@@ -415,13 +433,18 @@ private:
                         setFaultyIDS();
                     }
 
-                    _validPacket = this->handleResponse();
+                    const size_t trailer = NON_LENGTH_BYTECOUNT + _packetLength;
+                    const size_t finalMarker = trailer + 2 * ESCAPE_SEQUENCE_BYTECOUNT;
+
+                    _validPacket = _packetLength >= PACKET_LENGTH_MIN &&
+                    RS485Utils::convertU32InArr(_packet, trailer) == BINARY_ESCAPE_SEQUENCE &&
+                    validateChecksum() &&
+                    RS485Utils::convertU32InArr(_packet, finalMarker) == BINARY_ESCAPE_SEQUENCE;
 
                     if (_validPacket) { 
                         _receivedTime = esp_timer_get_time();
+                        this->handleResponse();
                     }
-                } else {
-                    _validPacket = false;
                 }
                 
                 // Reset the parser for a clean slate

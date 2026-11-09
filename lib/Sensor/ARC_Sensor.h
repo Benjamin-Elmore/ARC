@@ -24,8 +24,7 @@
 #include "RS485Comm.h"
 #include "RS485InterfaceSensor.h"
 #include "RS485Instance.h"
-
-#include "OpticalSensorConfig.h"
+#include "SensorOffsetConfig.h"
 
 // MAXIMUM VALUES PER SENSOR
 #ifndef SENSOR_MAX_FILTERS
@@ -89,6 +88,13 @@ class Sensor : public RS485InterfaceSensor {
               _muxChannel(muxChannel),
               _priority(priority)
         {
+
+            // SET SENSOR TYPE
+            // Offsets are added and type is changed
+            if (sensorType != SensorUtils::SensorConfig::NONE) {
+                this->setSensorType(sensorType);
+            }
+
             // SETUP AND LOOP SETUP
             // the FuncHead fields hold the head of the linked list
             if (appendedOnSetup.size() != 0){
@@ -263,6 +269,14 @@ class Sensor : public RS485InterfaceSensor {
             // Set the type of sensor and add the relevant values needed.
 
             this->_type = config;
+            SensorOffsetConfig::addOffsets(*this, config);
+            return true;
+        }
+
+        bool setSensorTypeWoOffset(SensorUtils::SensorConfig config) {
+            // Set the type of sensor on its own
+
+            this->_type = config;
             return true;
         }
 
@@ -405,6 +419,8 @@ class Sensor : public RS485InterfaceSensor {
         uint8_t getMuxI2C() { return this->_muxChannel; }
 
         uint8_t getID() override { return this->_sensorID; }
+
+        SensorUtils::SensorConfig getSensorType() { return this->_type; }
 
         void printReadings() {
             Vec3<uint16_t> reading{};
