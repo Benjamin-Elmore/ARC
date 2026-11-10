@@ -342,6 +342,7 @@ public:
             this->confirmStatus(ESP_ERR_INVALID_STATE, "resetMuxes: mutex lock not held");
             return ESP_ERR_INVALID_STATE;
         }
+        return ESP_OK;
     }
 
     bool confirmStatus(esp_err_t status, const char* location) {

@@ -43,7 +43,7 @@
 #define SENSOR_USER_SLOTS  4  // Number of per-sensor int scratch values.
 #endif
 #ifndef TASK_STACK_SIZE
-#define TASK_STACK_SIZE 2048
+#define TASK_STACK_SIZE 8192
 #endif
 #ifndef DEFAULT_PRIORITY
 #define DEFAULT_PRIORITY 2
@@ -136,7 +136,7 @@ class Sensor : public RS485InterfaceSensor {
 
             if (sensorReadFunction != NULL) {
                 this->_readFunction = sensorReadFunction;
-            } else{
+            } else if (this->_readFunction == NULL) {
                 this->_status = SensorUtils::SENSOR_ERR_NO_READER;
             }
 
@@ -268,7 +268,7 @@ class Sensor : public RS485InterfaceSensor {
         bool setSensorType(SensorUtils::SensorConfig config) override {
             // Set the type of sensor and add the relevant values needed.
 
-            this->_type = config;
+            this->setSensorTypeWoOffset(config);
             SensorOffsetConfig::addOffsets(*this, config);
             return true;
         }
@@ -277,6 +277,10 @@ class Sensor : public RS485InterfaceSensor {
             // Set the type of sensor on its own
 
             this->_type = config;
+            if (config == SensorUtils::SensorConfig::TEMPERATURE) {
+                this->_readFunction = SensorOffsetConfig::readTemperature<N>;
+                this->_offsetMemReg = 0x07;
+            }
             return true;
         }
 

@@ -70,7 +70,8 @@ namespace SensorUtils {
         NONE,
         OPTICAL,
         COLOR,
-        ENCODER
+        ENCODER,
+        TEMPERATURE
     };
 
     enum class PacketType : std::uint8_t {

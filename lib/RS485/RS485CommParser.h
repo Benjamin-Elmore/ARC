@@ -85,12 +85,18 @@ inline bool RS485Comm::parseResetEnd() {
     // Wrap up the reset and set the offsets given
     const uint16_t idCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
 
+    if (_currentOffsetSection >= MAX_OFFSET_VECTOR_COUNT) {
+        return false;
+    }
     for (int i = 0; i < idCount; i++) {
         if (_sensorIDS[i] == 0) {
             continue;
         }
 
         const size_t base = INDEX_SENSOR_DATA + 6 * i;
+        if (!_registryMap.contains(_sensorIDS[i]) || base + 6 > NON_LENGTH_BYTECOUNT + _packetLength) {
+            return false;
+        }
 
         if (this->_registryMap.contains(_sensorIDS[i])) {
             Vec3<uint16_t> values{
@@ -99,7 +105,7 @@ inline bool RS485Comm::parseResetEnd() {
                 RS485Utils::convertU16InArr(_packet, base + 4)
             };
 
-            if (_currentOffsetSection > MAX_OFFSET_VECTOR_COUNT) {
+            if (_currentOffsetSection >= MAX_OFFSET_VECTOR_COUNT) {
                 // We overshot our maximum
                 return false;
             }
@@ -110,15 +116,25 @@ inline bool RS485Comm::parseResetEnd() {
             std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsetSet{};
 
             for (int j = 0; j < MAX_OFFSET_VECTOR_COUNT; j++){
-                offsetSet[j] = *_pendingOffsets[i][j];
+                offsetSet[j] = _pendingOffsets[i][j].value_or(Vec3<uint16_t>{
+                    SensorUtils::UNUSED_OFFSETS, SensorUtils::UNUSED_OFFSETS,
+                    SensorUtils::UNUSED_OFFSETS});
             }
 
             // We have reached the end of the offsets for this sensor, give it over to
             // the sensor
-            this->_registryMap.at(i)->setOffsets(offsetSet);
+            const esp_err_t writeStatus = this->_registryMap.at(_sensorIDS[i])->setOffsets(offsetSet);
+            if (writeStatus != ESP_OK) {
+                printf("Offset write failed: sensor ID %u: %s\n", _sensorIDS[i], esp_err_to_name(writeStatus));
+                return false;
+            }
+            printf("Offsets applied on I2C bus: sensor ID %u, first value 0x%04X\n",
+                   _sensorIDS[i], values.x);
         }
     }
 
+    _currentOffsetSection = 0;
+    _pendingOffsets = {};
     return true;
 }
 

@@ -6,6 +6,36 @@
 namespace SensorOffsetConfig {
 
     template <std::size_t N>
+    void readTemperature(Sensor<N>& sensor, LockGuard& lock) {
+        constexpr uint8_t temperatureRegister = 0x00;
+        uint8_t temperatureBytes[2]{};
+        const esp_err_t readStatus = sensor.readDeviceRegister(
+            temperatureRegister, temperatureBytes, sizeof(temperatureBytes), lock);
+
+        if (readStatus != ESP_OK) {
+            return;
+        }
+
+        const uint16_t highByte = temperatureBytes[0];
+        const uint16_t lowByte = temperatureBytes[1];
+        const uint16_t rawTemperature = (highByte << 8) | lowByte;
+        sensor.setReadings({rawTemperature, 0, 0});
+    }
+
+    template <std::size_t N>
+    void addTemperatureOffsets(Sensor<N>& sensor) {
+        constexpr uint8_t temperatureOffsetRegister = 0x07;
+        constexpr uint16_t defaultTemperatureOffset = 0;
+        constexpr uint8_t temperaturePacketSection = 0;
+        constexpr uint8_t temperatureComponent = 0;
+        constexpr auto registerLayout = SensorUtils::OffsetLayout::REG_16_BIT_HIGH_FIRST;
+
+        sensor.appendOffset(
+            "offsetTemperature", defaultTemperatureOffset, temperatureOffsetRegister,
+            temperaturePacketSection, temperatureComponent, registerLayout);
+    }
+
+    template <std::size_t N>
     void addOpticalOffsets(Sensor<N>& sensor) {
         constexpr auto layout = SensorUtils::OffsetLayout::REG_16_BIT_LOW_FIRST;
         constexpr uint8_t positionSection = 0;
@@ -28,6 +58,10 @@ namespace SensorOffsetConfig {
         }
 
         switch (type) {
+            case SensorUtils::SensorConfig::TEMPERATURE:
+                addTemperatureOffsets(sensor);
+                break;
+
             case SensorUtils::SensorConfig::OPTICAL:
                 addOpticalOffsets(sensor);
                 break;
