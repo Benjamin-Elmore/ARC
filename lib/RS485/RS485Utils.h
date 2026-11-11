@@ -4,16 +4,16 @@
 #include <array>
 #include <algorithm>
 
-// UART CONFIGURATIONS
+// UART1 connects to IC10 (ST3485EBDR) on the Arsenal board.
 #define RS485_COMM_UART UART_NUM_1
 #ifndef UART_RTS_PIN
-#define UART_RTS_PIN    14      // TRANSMIT/RECIEVE ENABLE
+#define UART_RTS_PIN    14      // IC10 /RE and DE, pins 2 and 3
 #endif
 #ifndef UART_TX_PIN
-#define UART_TX_PIN     17      // TRANSMIT PIN
+#define UART_TX_PIN     17      // IC10 DI, pin 4
 #endif
 #ifndef UART_RX_PIN
-#define UART_RX_PIN     18      // RECEIVE PIN
+#define UART_RX_PIN     18      // IC10 RO, pin 1
 #endif
 #define BAUD_RATE       115200  // BITS PER SECOND
 

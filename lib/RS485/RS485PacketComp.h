@@ -134,9 +134,9 @@ inline size_t RS485Comm::compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD])
         if (_sensorIDS[i] == 0xFF) {
             // There was an error with the sensors, and we are passing through
             // Error data
-            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, 0xFF);
-            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, 0xFF);
-            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, 0xFF);
+            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, 0xFFFF);
+            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, 0xFFFF);
+            RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, 0xFFFF);
             continue;
         }
 
