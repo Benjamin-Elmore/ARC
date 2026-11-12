@@ -53,7 +53,7 @@ inline void RS485Comm::addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], u
     );
 }
 
-inline size_t RS485Comm::sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader) {
+inline size_t RS485Comm::sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader, const bool failure = false) {
     //NOTE: We wait to add the length and header until the end with the full packet
     
     // HEADER
@@ -71,7 +71,7 @@ inline size_t RS485Comm::sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const u
     size_t packetLengthInvariant{PACKET_LENGTH_MIN};
     switch (static_cast<RS485Utils::PacketType>(packetHeader)) {
         case RS485Utils::PacketType::Read:
-            if (!parseRead()) { return 0; }
+            if (!failure && !parseRead()) { return 0; }
             packetLengthInvariant = compileReadData(packet);
             break;
         case RS485Utils::PacketType::ResetStart:

@@ -51,7 +51,7 @@ public:
             RS485_COMM_UART,
             2048,
             0,
-            0,
+            16,             // Event queue consumed by the RS485 receive task
             &_uartEvents,   // HANDLE FOR UART
             0
         );
@@ -243,7 +243,7 @@ private:
     void addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], uint8_t length);
 
     // PACKET COMPILER FUNCTIONS
-    size_t sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader);
+    size_t sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader, const bool failure);
     size_t compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
 
     void calculateSensorIDs(){
@@ -271,27 +271,27 @@ private:
         }
     }
 
-    bool handleResponse(const bool failedRead = false){
+    bool handleResponse(const uint8_t type, const bool failed = false){
         // Extract data from our checked packet and send a response
-
-        // Packet Header, determining what packet we received
-        // Its shifted by 2 since the last 2 bits are irrelevant for determination
-        // 6 bits needed for id, so shift by 2
-        this->_packetHeader = (_packet[0] >> 2);
+        
+        //NOTE: Packet Header established in sendPkt when packet is passed its type
 
         // Time Data
         this->_timeSinceLastReceive = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SINCE_LAST_RECEIVE);
         this->_timeOfSending        = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SENT);
         
 
-        if (!failedRead){
-            this->calculateSensorIDs();
-        } else {
+        const RS485Utils::PacketType packetType = static_cast<RS485Utils::PacketType>(type);
+
+        if (failed || packetType == RS485Utils::PacketType::Failure){
+            // On either a read failure or a reset failure, set faulty ids
             this->setFaultyIDS();
+        } else {
+            this->calculateSensorIDs();
         }
 
         uint8_t packet[DEFAULT_MAX_PAYLOAD]{};
-        const size_t packetSize = sendPkt(packet, _packetHeader);
+        const size_t packetSize = sendPkt(packet, type, failed);
         if (packetSize == 0) {
             return false;
         }
@@ -386,6 +386,7 @@ private:
                 _currentPacketState = RS485Utils::ParseState::LENGTH;
             } else {
                 _discardUntilIdle = true;
+                _packetHeader = static_cast<uint8_t>(RS485Utils::PacketType::Failure);
             }
 
             break;
@@ -497,14 +498,19 @@ private:
             }
             
             if (uartEvent.type == UART_DATA) {
+                // This only triggers if we get data    
                 size_t remaining = uartEvent.size;
+                _receivedTime = esp_timer_get_time();
 
                 while (remaining > 0) {
+                    // The event reports buffered bytes; do not wait to fill the buffer.
+                    const size_t readSize = remaining < sizeof(_lastReadBytes)
+                        ? remaining : sizeof(_lastReadBytes);
                     int received = uart_read_bytes(
                         RS485_COMM_UART,
                         this->_lastReadBytes,
-                        sizeof(_lastReadBytes),
-                        pdMS_TO_TICKS(100)
+                        readSize,
+                        0
                     );
 
                     if (received <= 0) {
@@ -523,20 +529,44 @@ private:
                 }
 
                 if (uartEvent.timeout_flag) {
+                    using PacketType = RS485Utils::PacketType;
+
+                    bool successful = false;
+
                     if (_validPacket) {
-                        _receivedTime = esp_timer_get_time();
-                        
-                        // Automatically handle the response, if it fails, give it a failed read
-                        if(
-                            !handleResponse() && 
-                            static_cast<RS485Utils::PacketType>(_packetHeader) == RS485Utils::PacketType::Read
-                        ) {
-                            // Handle the response for a completely failed read
-                            handleResponse(true);
+                        // Generic response for a valid packet,
+                        // returns true if it is correct
+                        successful = handleResponse(_packetHeader, false);
+                    }
+
+                    if(!successful) {
+                        // We had a catastrophic failure in one of the packet types, either by the sent packet,
+                        // or by the packet work by ARC.
+                        // We convert our previous header to an enum and handle it accordinly in the switch-case
+                        // set below
+                        const PacketType headerAsEnum = static_cast<PacketType>(_packetHeader);
+
+                        switch(headerAsEnum){
+                            case PacketType::ResetStart:
+                            case PacketType::ResetContinue:
+                            case PacketType::ResetEnd:
+                                // All resets are failures
+                                handleResponse(static_cast<uint8_t>(PacketType::Failure), false);
+                            break;
+                            case PacketType::Read:
+                                // Send as a failed read, we are already set up, the failure is in the readers
+                                handleResponse(_packetHeader, true);
+                            break;
+                            case PacketType::Reboot:
+                            case PacketType::Failure:
+                                // In the other cases, reset ourselves
+                                handleResponse(static_cast<uint8_t>(PacketType::Failure), false);
+                            break;
+                            default:
+                                // Edge-case handling in this case will use a failure
+                                handleResponse(static_cast<uint8_t>(PacketType::Failure), false);
+                            break;
                         }
-                    } else if (static_cast<RS485Utils::PacketType>(_packetHeader) == RS485Utils::PacketType::Read) {
-                        // We have a read, but not a valid packet
-                        handleResponse(true);
                     }
                     
                     // Reset the parsing otherwise

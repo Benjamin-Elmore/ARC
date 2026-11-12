@@ -4,7 +4,7 @@
 #include <array>
 #include <algorithm>
 
-// UART1 connects to IC10 (ST3485EBDR) on the Arsenal board.
+// UART1 routed to IC10 (ST3485EBDR), Brain connector J2.
 #define RS485_COMM_UART UART_NUM_1
 #ifndef UART_RTS_PIN
 #define UART_RTS_PIN    14      // IC10 /RE and DE, pins 2 and 3
