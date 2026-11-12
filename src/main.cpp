@@ -1,60 +1,45 @@
-#include "ARC_Sensor.h"
-#include "I2CBus.h"
-#include "i2cUtils.h"
+#include "RS485Instance.h"
+#include "I2CBusInstance.h"
 #include "esp_log.h"
 
 namespace {
     constexpr const char* TAG = "ARC";
-    constexpr uint8_t OTOS_ADDRESS = 0x17;
-    constexpr uint8_t OTOS_SENSOR_ID = 1;
-    constexpr uint8_t OTOS_MUX_CHANNEL = 0;
-    constexpr uint8_t OTOS_POSITION_REGISTER = 0x20;
-    constexpr uint8_t OTOS_OFFSET_REGISTER = 0x10;
-
-    void readOtosPosition(Sensor<1>& sensor) {
-        uint8_t data[6]{};
-        if (sensor.readDeviceRegister(OTOS_POSITION_REGISTER, data, sizeof(data)) != ESP_OK) {
-            return;
-        }
-        // OTOS registers are little-endian; preserve signed bits in the wire values.
-        sensor.setReadings({
-            static_cast<uint16_t>(i2cUtils::convertTo16Bits(&data[0])),
-            static_cast<uint16_t>(i2cUtils::convertTo16Bits(&data[2])),
-            static_cast<uint16_t>(i2cUtils::convertTo16Bits(&data[4]))
-        });
-    }
+    constexpr uint8_t TMP117_ADDRESS = 0x48;
+    constexpr uint8_t TEMP1_ID = 2;
+    constexpr uint8_t TEMP2_ID = 3;
+    constexpr uint8_t TEMP3_ID = 4;
+    constexpr uint8_t TEMP1_MUX_CHANNEL = 3;   // 0x70, channel 3
+    constexpr uint8_t TEMP2_MUX_CHANNEL = 4;   // 0x70, channel 4
+    constexpr uint8_t TEMP3_MUX_CHANNEL = 11;  // 0x71, channel 3
 }
 
-extern "C" void app_main(void)
+extern "C" void app_main()
 {
-    // static RS485Comm comm25(2, 3, 4);
-    // comm25.setSerialMonitoring(true);
-    // if (!comm25.checkCommStatus()) {
-    //     ESP_LOGE(TAG, "RS485 UART setup failed");
-    //     comm25.serialStatus();
-    //     return;
-    // }
+    RS485ARSENAL::createRS485Instance();
+    RS485ARSENAL::BaseRS485Instance->setSerialMonitoring(true);
 
-    static I2CBus<1> bus25(GPIO_NUM_6, GPIO_NUM_7, I2C_NUM_1, GPIO_NUM_NC, {0x70});
-    ESP_ERROR_CHECK(bus25.getStatus());
+    I2CARSENAL::createI2CInstances();
+    auto& sensorBus = *I2CARSENAL::multiplexerBus;
+    constexpr auto temperature = SensorUtils::SensorConfig::TEMPERATURE;
+    static Sensor<2> temp1(
+        "temp1", sensorBus, TMP117_ADDRESS, TEMP1_ID, false, temperature, TEMP1_MUX_CHANNEL);
+    static Sensor<2> temp2(
+        "temp2", sensorBus, TMP117_ADDRESS, TEMP2_ID, false, temperature, TEMP2_MUX_CHANNEL);
+    static Sensor<2> temp3(
+        "temp3", sensorBus, TMP117_ADDRESS, TEMP3_ID, false, temperature, TEMP3_MUX_CHANNEL);
 
-    // Sensor::setup() registers through this pointer; use the existing UART instance.
-    // RS485ARSENAL::BaseRS485Instance = &comm25;
-    static Sensor<1> opticalSensor(
-        "OTOS", bus25, OTOS_ADDRESS, OTOS_SENSOR_ID, true,
-        SensorPreconfig::NONE, OTOS_MUX_CHANNEL, DEFAULT_PRIORITY,
-        {}, {}, {}, {}, readOtosPosition, OTOS_OFFSET_REGISTER
-    );
-    const auto sensorStatus = opticalSensor.setup();
-    if (sensorStatus != SensorUtils::SENSOR_OK) {
-        ESP_LOGE(TAG, "OTOS setup failed: %s", SensorUtils::sensor_status_str(sensorStatus));
-        return;
+    for (auto* sensor : {&temp1, &temp2, &temp3}) {
+        const auto status = sensor->setup();
+        if (status != SensorUtils::SENSOR_OK) {
+            ESP_LOGE(TAG, "%s setup failed: %s", sensor->getName().data(),
+                     SensorUtils::sensor_status_str(status));
+            continue;
+        }
+        ESP_LOGI(TAG, "%s registered as RS485 sensor ID %u", sensor->getName().data(),
+                 static_cast<unsigned>(sensor->getID()));
     }
 
-    // Register the sensor before the receiver task makes the registry immutable.
-    // const esp_err_t status = comm25.start();
-    // if (status != ESP_OK) {
-    //     ESP_LOGE(TAG, "RS485 start failed: %s", esp_err_to_name(status));
-    //     comm25.serialStatus();
-    // }
+    ESP_ERROR_CHECK(RS485ARSENAL::startRS485ARSENAL());
+    ESP_LOGI(TAG, "Arsenal RS485 listening on UART%d at %d baud (TX=%d RX=%d RTS=%d)",
+             RS485_COMM_UART, BAUD_RATE, UART_TX_PIN, UART_RX_PIN, UART_RTS_PIN);
 }

@@ -20,11 +20,11 @@
 #include "SensorUtils.h"
 #include "LockGuard.h"
 #include "Vec3.h"
-// #include "OpticalPreconfig.h" // Deferred until optical preset work resumes.
 #include "I2CBus.h"
 #include "RS485Comm.h"
 #include "RS485InterfaceSensor.h"
 #include "RS485Instance.h"
+#include "SensorOffsetConfig.h"
 
 // MAXIMUM VALUES PER SENSOR
 #ifndef SENSOR_MAX_FILTERS
@@ -43,7 +43,7 @@
 #define SENSOR_USER_SLOTS  4  // Number of per-sensor int scratch values.
 #endif
 #ifndef TASK_STACK_SIZE
-#define TASK_STACK_SIZE 2048
+#define TASK_STACK_SIZE 8192
 #endif
 #ifndef DEFAULT_PRIORITY
 #define DEFAULT_PRIORITY 2
@@ -52,23 +52,11 @@
 #define LOCK_FAIL_DELAY 50
 #endif
 
-
-
-enum FunctionReferences {
-    ON_SETUP,
-    ON_LOOP
-};
-
-enum SensorPreconfig {
-    NONE,
-    OPTICAL,
-    COLOR,
-    ENCODER
-};
 template <size_t N>
 class Sensor : public RS485InterfaceSensor {
     public:
         using FunctionCallback = SensorUtils::FunctionCallback<N>;
+        using ReadFuncCallback = SensorUtils::ReadFuncCallback<N>;
 
         // CONSTRUCTOR:
         // Establish the fields for the sensor to be accessed later
@@ -80,14 +68,15 @@ class Sensor : public RS485InterfaceSensor {
                 uint8_t deviceAddrI2C,                                                          // I2C ADDRESS
                 uint8_t deviceID,                                                               // DEVICE ID
                 bool printReadings = false,                                                     // PRINT READINGS
-                SensorPreconfig sensorType = SensorPreconfig::NONE,                             // SENSOR PRECONFIG
+                SensorUtils::SensorConfig sensorType = SensorUtils::SensorConfig::NONE,         // SENSOR PRECONFIG
                 uint8_t muxChannel = SensorUtils::UNUSED_MUX,                                   // MUX CHANNEL
                 uint8_t priority = DEFAULT_PRIORITY,                                            // SENSOR TASK PRIORITY
                 std::initializer_list <FunctionCallback> appendedOnSetup = {},                  // STARTUP FUNCTIONS
                 std::initializer_list<FunctionCallback> appendedOnLoop = {},                    // LOOP FUNCTIONS
                 std::initializer_list<SensorUtils::AppendedMethod<N>> appendedMethods = {},     // APPENDED METHODS
                 std::initializer_list<SensorUtils::AppendedVariable> appendedVariables = {},    // APPENDED VARIABLES
-                FunctionCallback sensorReadFunction = NULL,                                     // READ FUNCTION
+                std::initializer_list<SensorUtils::AppendedOffset> appendedOffsets = {},        // APPENDED OFFSETS
+                ReadFuncCallback sensorReadFunction = NULL,                                     // READ FUNCTION
                 uint8_t offsetMemReg = SensorUtils::UNUSED_OFFSET_REG                           // MEM REG FOR OFFSETS
             )
             : _name(name == nullptr ? "" : name),
@@ -100,9 +89,12 @@ class Sensor : public RS485InterfaceSensor {
               _priority(priority)
         {
 
-            if (sensorType != SensorPreconfig::NONE){
-                //TODO: Add preconfig function for reader
+            // SET SENSOR TYPE
+            // Offsets are added and type is changed
+            if (sensorType != SensorUtils::SensorConfig::NONE) {
+                this->setSensorType(sensorType);
             }
+
             // SETUP AND LOOP SETUP
             // the FuncHead fields hold the head of the linked list
             if (appendedOnSetup.size() != 0){
@@ -137,10 +129,14 @@ class Sensor : public RS485InterfaceSensor {
             for (const SensorUtils::AppendedVariable& variable : appendedVariables) {
                 this->appendVariable(variable.variableName, variable.variable);
             }
+            for (const SensorUtils::AppendedOffset& offset : appendedOffsets) {
+                this->appendOffset(offset.name, offset.value, offset.memoryRegistry,
+                                   offset.packetSection, offset.component, offset.layout);
+            }
 
             if (sensorReadFunction != NULL) {
                 this->_readFunction = sensorReadFunction;
-            } else{
+            } else if (this->_readFunction == NULL) {
                 this->_status = SensorUtils::SENSOR_ERR_NO_READER;
             }
 
@@ -194,17 +190,25 @@ class Sensor : public RS485InterfaceSensor {
                     continue;
                 }
 
-                const esp_err_t busStatus = _sensorCommBusI2C.addSensorToBus(
-                    getName(), _muxChannel, _devAddrI2C
-                );
-                if (busStatus != ESP_OK) {
-                    _status = SensorUtils::SENSOR_ERR_IO;
-                    return _status;
+                // Sensor may have been registered outside of this class,
+                // we will not add the sensor if it has been added outside of
+                // setup()
+                if (!_sensorCommBusI2C.containsSensor(this->getName())) {
+                    const esp_err_t busStatus = _sensorCommBusI2C.addSensorToBus(
+                        getName(), _muxChannel, _devAddrI2C, lock
+                    );
+
+                    if (busStatus != ESP_OK) {
+                        _status = SensorUtils::SENSOR_ERR_IO;
+                        return _status;
+                    }
                 }
 
-                const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(getName());
+                
+
+                const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(getName(), lock);
                 if (muxStatus != ESP_OK) {
-                    _sensorCommBusI2C.removeSensorFromBus(this->getName());
+                    _sensorCommBusI2C.removeSensorFromBus(this->getName(), lock);
                     _status = SensorUtils::SENSOR_ERR_IO;
 
                     return _status;
@@ -261,6 +265,25 @@ class Sensor : public RS485InterfaceSensor {
             _stopRequested.store(true);
         }
 
+        bool setSensorType(SensorUtils::SensorConfig config) override {
+            // Set the type of sensor and add the relevant values needed.
+
+            this->setSensorTypeWoOffset(config);
+            SensorOffsetConfig::addOffsets(*this, config);
+            return true;
+        }
+
+        bool setSensorTypeWoOffset(SensorUtils::SensorConfig config) {
+            // Set the type of sensor on its own
+
+            this->_type = config;
+            if (config == SensorUtils::SensorConfig::TEMPERATURE) {
+                this->_readFunction = SensorOffsetConfig::readTemperature<N>;
+                this->_offsetMemReg = 0x07;
+            }
+            return true;
+        }
+
         void appendMethod(std::string_view functionName, FunctionCallback function) {
             // Append a method to the hash table
 
@@ -282,6 +305,38 @@ class Sensor : public RS485InterfaceSensor {
             this->_appendedMethods.emplace(functionName, function);
         }
 
+        void appendOffset(
+            std::string_view offsetName, uint16_t offset, uint8_t memRegistry,
+            uint8_t packetSection, uint8_t component, SensorUtils::OffsetLayout layout
+        ) {
+
+            if (
+                packetSection >= MAX_OFFSET_VECTOR_COUNT ||
+                component >= 3 ||
+                _appendedOffsets.contains(offsetName)
+            ) {
+                _status = SensorUtils::SENSOR_ERR_ARG;
+                return;
+            }
+
+            if (this->_appendedOffsets.size() >= SENSOR_USER_SLOTS) {
+                this->_status = SensorUtils::SENSOR_ERR_FULL;
+                return;
+            }
+            
+            SensorUtils::AppendedOffset newOffset(
+                offsetName,
+                offset,
+                memRegistry,
+                packetSection,
+                component,
+                layout
+            );
+
+            this->_appendedOffsets.emplace(offsetName, newOffset);
+            _defaultOffsetValues.emplace(offsetName, offset);
+        }
+
         void appendVariable(std::string_view variableName, uint16_t variable) {
             // Append a variable to the hash table
 
@@ -296,6 +351,7 @@ class Sensor : public RS485InterfaceSensor {
             }
             
             this->_appendedVariables.emplace(variableName, variable);
+            _defaultVariableValues.emplace(variableName, variable);
         }
 
         void executeAppendedMethod(char* methodName) {
@@ -307,20 +363,27 @@ class Sensor : public RS485InterfaceSensor {
         }
 
         uint16_t getAppendedVariable(char* variableName) {
-            if (this->_appendedVariables.contains(variableName)){
-                return this->_appendedVariables.at(variableName);
-            } else {
-                this->_status = SensorUtils::SENSOR_ERR_NOT_FOUND;
-                // Return a sentinel value
-                return SensorUtils::FAULTY_VARIABLE;
+            portENTER_CRITICAL(&_readingMux);
+            const auto it = _appendedVariables.find(variableName);
+            const bool found = it != _appendedVariables.end();
+            const uint16_t value = found ? it->second : SensorUtils::FAULTY_VARIABLE;
+            portEXIT_CRITICAL(&_readingMux);
+            if (!found) {
+                _status = SensorUtils::SENSOR_ERR_NOT_FOUND;
             }
+            return value;
         }
 
         void setAppendedVariable(std::string_view variableName, uint16_t data) {
-            if (this->_appendedVariables.contains(variableName)) {
-                this->_appendedVariables.at(variableName) = data;
-            } else {
-                this->_status = SensorUtils::SENSOR_ERR_ARG;
+            portENTER_CRITICAL(&_readingMux);
+            const auto it = _appendedVariables.find(variableName);
+            const bool found = it != _appendedVariables.end();
+            if (found) {
+                it->second = data;
+            }
+            portEXIT_CRITICAL(&_readingMux);
+            if (!found) {
+                _status = SensorUtils::SENSOR_ERR_ARG;
             }
         }
 
@@ -361,50 +424,120 @@ class Sensor : public RS485InterfaceSensor {
 
         uint8_t getID() override { return this->_sensorID; }
 
-        void printReadings() {
-            printf("%s READINGS", std::string(this->_name).c_str());
-            printf("X: %d", this->_reading.x);
-            printf("Y: %d", this->_reading.y);
-            printf("H: %d", this->_reading.z);
+        SensorUtils::SensorConfig getSensorType() { return this->_type; }
 
-            return;
+        void printReadings() {
+            Vec3<uint16_t> reading{};
+            if (getReadings(reading)) {
+                printf("%s READINGS X: %u Y: %u H: %u\n", _name.c_str(),
+                       static_cast<unsigned int>(reading.x),
+                       static_cast<unsigned int>(reading.y),
+                       static_cast<unsigned int>(reading.z));
+            } else {
+                printf("%s READINGS unavailable (status: %s)\n", _name.c_str(),
+                       SensorUtils::sensor_status_str(_status.load()));
+            }
+            fflush(stdout);
         }
 
         // WRAPPERS FOR I2CBus
-        esp_err_t readDeviceRegister(const uint8_t regAddr, uint8_t *data, const size_t length) {
-            esp_err_t status = this->_sensorCommBusI2C.readRegister(this->_name, regAddr, data, length);
+        esp_err_t readDeviceRegister(const uint8_t regAddr, uint8_t *data, const size_t length, LockGuard& lock) {
+            if (!lock.isMutexLocked()) {
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            esp_err_t status = this->_sensorCommBusI2C.readRegister(this->_name, regAddr, data, length, lock);
             this->confirmStatus(status);
+
+            if (status != ESP_OK) {
+                // Could not read correctly
+                this->invalidateReadings();
+            }
+
             return status;
         }
         
-        esp_err_t writeDeviceRegister(uint8_t regAddr, uint8_t data) {
-            esp_err_t status = this->_sensorCommBusI2C.writeRegister(this->_name, regAddr, data);
+        esp_err_t writeDeviceRegister(uint8_t regAddr, uint8_t data, LockGuard& lock) {
+            if (!lock.isMutexLocked()) {
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            esp_err_t status = this->_sensorCommBusI2C.writeRegister(this->_name, regAddr, data, lock);
             this->confirmStatus(status);
             return status;
         }
 
         // OFFSET SETTER
-        esp_err_t setOffsets(Vec3<uint16_t> o) override {
-            this->_offsets.x = o.x;
-            this->_offsets.y = o.y;
-            this->_offsets.z = o.z;
+        esp_err_t setOffsets(std::array<Vec3<uint16_t>, MAX_OFFSET_VECTOR_COUNT> offsetArr) override {
+            LockGuard lock(_sensorCommBusI2C.getMutex());
+            if (!lock.isMutexLocked()) {
+                confirmStatus(ESP_ERR_INVALID_STATE);
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            // Create a multidimensional vector to access for the for loop
+            std::array<std::array<uint16_t, 3>, MAX_OFFSET_VECTOR_COUNT> values{};
+
+            for (size_t i = 0; i < offsetArr.size(); i++) {
+                // Get the vector into a set of 3 for each row of the array
+                values[i] = {offsetArr[i].x, offsetArr[i].y, offsetArr[i].z};
+            }
+
+            for (auto& [name, offset] : _appendedOffsets) {
+                const uint16_t offsetValue = values[offset.packetSection][offset.component];
+
+                if (offsetValue != SensorUtils::UNUSED_OFFSETS) {
+                    offset.value = offsetValue;
+                }
+            }
 
             // Change the memory registry for the sensor offsets
             // Return the success
-            return this->setSensorOffsets();
+            return this->setHardwareOffsets(lock);
         }
 
+        esp_err_t reboot() override {
+            // Serialize with polling and offset register writes.
+            LockGuard lock(_sensorCommBusI2C.getMutex());
+            if (!lock.isMutexLocked()) {
+                return ESP_ERR_INVALID_STATE;
+            }
+
+            for (const auto& [name, value] : _defaultOffsetValues) {
+                _appendedOffsets.at(name).value = value;
+            }
+
+            portENTER_CRITICAL(&_readingMux);
+            for (const auto& [name, value] : _defaultVariableValues) {
+                _appendedVariables.at(name) = value;
+            }
+            _reading = {};
+            _validPacket = false;
+            _status = SensorUtils::SENSOR_ERR_NOT_READY;
+            portEXIT_CRITICAL(&_readingMux);
+            return ESP_OK;
+        }
+
+        // Read function setter
         void setReadings(const Vec3<uint16_t>& reading) {
             portENTER_CRITICAL(&_readingMux);
             _reading = reading;
+            _validPacket = true;
+            auto expected = SensorUtils::SENSOR_ERR_NOT_READY;
+            _status.compare_exchange_strong(expected, SensorUtils::SENSOR_OK);
             portEXIT_CRITICAL(&_readingMux);
         }
 
-        Vec3<uint16_t> getReadings() override {
+        // Reading getter, used by RS485Comm when building a packet
+        bool getReadings(Vec3<uint16_t>& out) override {
             portENTER_CRITICAL(&_readingMux);
-            Vec3<uint16_t> reading = {this->_reading.x, this->_reading.y, this->_reading.z};
+            out = {this->_reading.x, this->_reading.y, this->_reading.z};
+            const bool valid = _validPacket;
             portEXIT_CRITICAL(&_readingMux);
-            return reading;
+
+            // This return is important, as it will determine if we can accept the
+            // packet as-is.
+            return valid;
         }
 
         esp_err_t registerSensor() override {
@@ -421,12 +554,13 @@ class Sensor : public RS485InterfaceSensor {
         std::string _name;
         bool _outputReadings{};
 
-        FunctionCallback _readFunction = NULL;
+        ReadFuncCallback _readFunction = NULL;
         
         // CRITICAL DATA:
         Vec3<uint16_t> _offsets{};
         uint8_t _sensorID{};
         uint8_t _offsetMemReg{};
+        bool _validPacket{};
 
         Vec3<uint16_t> _reading{};
 
@@ -441,6 +575,7 @@ class Sensor : public RS485InterfaceSensor {
         //APPENDED METHODS AND VARIABLES, stored in hash tables
         std::unordered_map<std::string_view, FunctionCallback> _appendedMethods = {};
         std::unordered_map<std::string_view, uint16_t> _appendedVariables = {};
+        std::unordered_map<std::string_view, SensorUtils::AppendedOffset> _appendedOffsets = {};
 
         void fullStopFAIL() {
             if (_taskObject != nullptr) {
@@ -459,53 +594,73 @@ class Sensor : public RS485InterfaceSensor {
             }
         }
 
-        esp_err_t setSensorOffsets() {
+        esp_err_t setHardwareOffsets(LockGuard& lock) {
 
             if (_offsetMemReg == SensorUtils::UNUSED_OFFSET_REG) {
                 _status = SensorUtils::SENSOR_ERR_ARG;
                 return _status;
             }
 
-            if (
-                _offsets.x != SensorUtils::UNUSED_OFFSETS &&
-                _offsets.y != SensorUtils::UNUSED_OFFSETS &&
-                _offsets.z != SensorUtils::UNUSED_OFFSETS
-            ) {
-                if (_sensorCommBusI2C.getMutex() == nullptr) {
-                    _status = SensorUtils::SENSOR_ERR_IO;
-                    return _status;
-                }
+            // Select the mux channel
+            const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName(), lock);
 
-                for(;;) {
-                    // Run through this loop to wait for the mutex
-                    LockGuard lock(this->_sensorCommBusI2C.getMutex());
+            confirmStatus(muxStatus);
 
-                    if (lock.isMutexLocked()) {
-                        // Select the mux channel
-                        const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName());
+            if (muxStatus != ESP_OK) {
+                return muxStatus;
+            }
 
-                        confirmStatus(muxStatus);
+            esp_err_t writeStatus{};
+            using OffsetLayout = SensorUtils::OffsetLayout;
 
-                        if (muxStatus != ESP_OK) {
-                            return muxStatus;
+            // Iterate through each offset stored in the map
+            for (auto& [name, offset] : _appendedOffsets) {
+                switch (offset.layout) {
+                    case (OffsetLayout::REG_8_BIT):
+                        if (offset.value > 0xFF) {
+                            return ESP_ERR_INVALID_ARG;
                         }
 
-                        // Create the write buffer for the offsets
-                        uint8_t offsetWriteBuf[6]{};
-                        SensorUtils::convertOffsetsToArr(offsetWriteBuf, _offsets);
-
-                        // Write the buffer
-                        esp_err_t status = _sensorCommBusI2C.writeArrayRegister(
-                            this->getName(),
-                            _offsetMemReg,
-                            offsetWriteBuf
+                        writeStatus = writeDeviceRegister(
+                            offset.memoryRegistry,
+                            static_cast<uint8_t>(offset.value),
+                            lock
                         );
-                        
-                        confirmStatus(status);
-                        return _status;
-                    }
+                    break;
 
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    case (OffsetLayout::REG_16_BIT_HIGH_FIRST):
+                    case (OffsetLayout::REG_16_BIT_LOW_FIRST): {
+
+                        if (offset.memoryRegistry == 0xFF) {
+                            return ESP_ERR_INVALID_ARG;
+                        }
+
+                        const uint8_t low = static_cast<uint8_t>(offset.value & 0xFF);
+                        const uint8_t high = static_cast<uint8_t>(offset.value >> 8);
+
+                        const uint8_t buffer[2] = {
+                            (offset.layout == OffsetLayout::REG_16_BIT_HIGH_FIRST) ? high : low,
+                            (offset.layout == OffsetLayout::REG_16_BIT_HIGH_FIRST) ? low : high
+                        };
+
+                        writeStatus = _sensorCommBusI2C.writeArrayRegister(
+                            this->getName(),
+                            offset.memoryRegistry,
+                            buffer,
+                            lock
+                        );
+                        break;
+                    }
+                    default:
+                        return ESP_ERR_INVALID_ARG;
+                    break;
+                }
+
+                // After each loop occurance, check the write success
+                // and return it if there is an error
+                confirmStatus(writeStatus);
+                if (writeStatus != ESP_OK) {
+                    return writeStatus;
                 }
             }
 
@@ -545,12 +700,14 @@ class Sensor : public RS485InterfaceSensor {
                     } else if (this->_readFunction != NULL) {
                         // Run the preconfigured read function
                         // The if statement is for safety
-                        const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName());
+                        const esp_err_t muxStatus = _sensorCommBusI2C.selectMuxChannel(this->getName(), loopLock);
 
                         if (muxStatus != ESP_OK){
                             this->confirmStatus(muxStatus);
+                            invalidateReadings();
                         } else {
-                            this->_readFunction(*this);
+                            // Execute the read function
+                            this->_readFunction(*this, loopLock);
                         }
                     }
                 }
@@ -571,6 +728,12 @@ class Sensor : public RS485InterfaceSensor {
             vTaskDelete(nullptr);
         }
 
+        void invalidateReadings() {
+            portENTER_CRITICAL(&_readingMux);
+            _validPacket = false;
+            portEXIT_CRITICAL(&_readingMux);
+        }
+
     private:
         //STATUS FIELDS
         I2CBus<N>& _sensorCommBusI2C;
@@ -578,6 +741,11 @@ class Sensor : public RS485InterfaceSensor {
 
         uint8_t _core{1};
         uint8_t _priority{DEFAULT_PRIORITY};
+
+        std::unordered_map<std::string_view, uint16_t> _defaultVariableValues;
+        std::unordered_map<std::string_view, uint16_t> _defaultOffsetValues;
+
+        SensorUtils::SensorConfig _type{};
 
         bool _exceededMaximums{false};
         bool _setupRan{false};

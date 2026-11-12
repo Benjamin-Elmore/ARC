@@ -10,6 +10,7 @@
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "esp_rom_sys.h"
+#include "esp_log.h"
 
 #include "LockGuard.h"
 
@@ -85,7 +86,7 @@ public:
         // Add an error if the mux doesn't have the correct arguments passed
         // in the constructor
         if (N > 0 && _muxAddresses.size() == 0) {
-            this->_errorStatus = ESP_ERR_INVALID_ARG;
+            confirmStatus(ESP_ERR_INVALID_ARG, "setupI2CBus: missing mux addresses");
             return;
         }
 
@@ -93,11 +94,13 @@ public:
         // Mux Addresses cannot match, nested for loop below checks for this
         for (size_t i = 0; i < N; ++i) {
             if (_muxAddresses[i] == 0 || _muxAddresses[i] > 0x7F) {
-                confirmStatus(ESP_ERR_INVALID_ARG); return;
+                confirmStatus(ESP_ERR_INVALID_ARG, "setupI2CBus: invalid mux address");
+                return;
             }
             for (size_t j = 0; j < i; ++j) {
                 if (_muxAddresses[i] == _muxAddresses[j]) {
-                    confirmStatus(ESP_ERR_INVALID_ARG); return;
+                    confirmStatus(ESP_ERR_INVALID_ARG, "setupI2CBus: duplicate mux address");
+                    return;
                 }
             }
         }
@@ -117,7 +120,7 @@ public:
         };
 
         // Create the master bus, controlled with the busHandle object
-        if (!this->confirmStatus(i2c_new_master_bus(&i2cMasterConfig, &this->_busHandle))) {
+        if (!this->confirmStatus(i2c_new_master_bus(&i2cMasterConfig, &this->_busHandle), "setupI2CBus: create master bus")) {
             return;
         }
         
@@ -128,21 +131,20 @@ public:
 
             this->_muxCurrentChannels.at(i) = 0xF;
 
-            i2c_device_config_t muxConfig = {
-                .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-                .device_address = _muxAddresses.at(i),
-                .scl_speed_hz = 10000,
-            };
+            i2c_device_config_t muxConfig{};
+            muxConfig.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+            muxConfig.device_address = _muxAddresses.at(i);
+            muxConfig.scl_speed_hz = 10000;
 
             // Add mux to the bus
-            if (!this->confirmStatus(i2c_master_bus_add_device(this->_busHandle, &muxConfig, &this->_muxHandles.at(i)))) {
+            if (!this->confirmStatus(i2c_master_bus_add_device(this->_busHandle, &muxConfig, &this->_muxHandles.at(i)), "setupI2CBus: add mux device")) {
                 return;
             }
         }
 
         // A mux may have RESET held high in hardware instead of wired to a GPIO.
         if (N > 0 && _gpioReset != GPIO_NUM_NC) {
-            if (!this->confirmStatus(gpio_set_level(_gpioReset, 1))) {
+            if (!this->confirmStatus(gpio_set_level(_gpioReset, 1), "setupI2CBus: set RESET high")) {
                 return;
             }
 
@@ -153,7 +155,7 @@ public:
             config.pull_down_en = GPIO_PULLDOWN_DISABLE;
             config.intr_type = GPIO_INTR_DISABLE;
 
-            if (!this->confirmStatus(gpio_config(&config))) {
+            if (!this->confirmStatus(gpio_config(&config), "setupI2CBus: configure RESET GPIO")) {
                 return;
             }
         }
@@ -162,13 +164,13 @@ public:
         this->_busMutex = xSemaphoreCreateMutex();
 
         if (!_busMutex) {
-            confirmStatus(ESP_ERR_NO_MEM);
+            confirmStatus(ESP_ERR_NO_MEM, "setupI2CBus: create bus mutex");
             return;
         }
 
         // resetMuxes() needs both the configured GPIO and the bus mutex.
         if (N > 0 && _gpioReset != GPIO_NUM_NC) {
-            if (!this->confirmStatus(this->resetMuxes())) {
+            if (!this->confirmStatus(this->resetMuxes(), "setupI2CBus: reset muxes")) {
                 return;
             }
         }
@@ -176,15 +178,32 @@ public:
         this->_intialized = true;
     }
 
-    esp_err_t addSensorToBus (std::string_view name, uint8_t muxChannel, uint8_t i2cAddress) {
-        if (!_intialized) { return ESP_ERR_INVALID_STATE; }
-        if (this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
+    esp_err_t addSensorToBus (std::string_view name, uint8_t muxChannel, uint8_t i2cAddress, LockGuard& lock) {
+        if (!_intialized) {
+            confirmStatus(ESP_ERR_INVALID_STATE, "addSensorToBus: bus not initialized");
+            return ESP_ERR_INVALID_STATE;
+        }
 
-        if (name.empty() || i2cAddress == 0 || i2cAddress > 0x7F ||
-            (muxChannel != 0xFF && muxChannel / MUX_CHANNEL_CT >= N)) {
+        if (!lock.isMutexLocked()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "addSensorToBus: bus lock not held");
             return ESP_ERR_INVALID_ARG;
         }
 
+        // If the sensor was registered during its setup sequence or before,
+        // the sensor already exists on the bus, and the registry is ok.
+        // Nothing needs to happen here, since the Sensor is on the bus
+        if (this->_registryMap.contains(std::string(name))) { return ESP_OK; }
+
+        // Check for faulty arguments
+        if (name.empty() || i2cAddress == 0 || i2cAddress > 0x7F ||
+            (muxChannel != 0xFF && muxChannel / MUX_CHANNEL_CT >= N)) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "addSensorToBus: invalid sensor arguments");
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        // The channel is a single number value
+        // Here, in the actual code, we split it to separate the mux itself
+        // from its own channel.
         SensorRegistry newSensorRegistry {
             static_cast<uint8_t>(muxChannel / MUX_CHANNEL_CT),                // MUX Index
             static_cast<uint8_t>(muxChannel % MUX_CHANNEL_CT)                 // MUX Channel within Index
@@ -192,17 +211,17 @@ public:
 
         // Add the new sensor, sensorHandle will be added after config is completed
         
-        i2c_device_config_t sensorConfig = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = i2cAddress,
-            .scl_speed_hz = 100000,
-        };
+        i2c_device_config_t sensorConfig{};
+        sensorConfig.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+        sensorConfig.device_address = i2cAddress;
+        sensorConfig.scl_speed_hz = 100000;
 
         esp_err_t addConfigStatus = i2c_master_bus_add_device(
             this->_busHandle,                                   // Bus handle
             &sensorConfig,                                      // Sensor config obj
             &newSensorRegistry.sensorHandle                     // Sensor handle in the temp registry
         );
+        confirmStatus(addConfigStatus, "addSensorToBus: add sensor device");
 
         if (addConfigStatus == ESP_OK) {
             this->_registryMap.emplace(std::string(name), newSensorRegistry);
@@ -213,15 +232,22 @@ public:
 
     // Caller holds the bus mutex.
     // Stop all users of this device before removing it.
-    esp_err_t removeSensorFromBus(std::string_view name) {
+    esp_err_t removeSensorFromBus(std::string_view name, LockGuard& lock) {
+        
+        if (!lock.isMutexLocked()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "removeSensorFromBus: bus lock not held");
+            return ESP_ERR_INVALID_ARG;
+        }
+
         const auto it = _registryMap.find(std::string(name));
         if (it == _registryMap.end()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "removeSensorFromBus: sensor not registered");
             return ESP_ERR_INVALID_ARG;
         }
 
         const esp_err_t status =
             i2c_master_bus_rm_device(it->second.sensorHandle);
-        confirmStatus(status);
+        confirmStatus(status, "removeSensorFromBus: remove sensor device");
         if (status == ESP_OK) {
             _registryMap.erase(it);
         }
@@ -229,13 +255,20 @@ public:
         return status;
     }
 
-    inline esp_err_t selectMuxChannel (const std::string_view sensorName) {
+    // A mutex lock is required, so pass through the lock to prove it is a valid selection
+    inline esp_err_t selectMuxChannel (const std::string_view sensorName, LockGuard& lock) {
         // Select a target channel on the mux
         // NOTE: Use only if a mux exists for the I2CBus instance
+
+        if (!lock.isMutexLocked()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "selectMuxChannel: bus lock not held");
+            return ESP_ERR_INVALID_ARG;
+        }
 
         const auto sensorIt = this->_registryMap.find(std::string(sensorName));
 
         if (sensorIt == this->_registryMap.end()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "selectMuxChannel: sensor not registered");
             return ESP_ERR_INVALID_ARG;
         }
 
@@ -244,11 +277,13 @@ public:
         const bool isUnused = targetSensor.muxNumber == 0xFF / MUX_CHANNEL_CT;
 
         if (!isUnused && targetSensor.muxNumber >= N) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "selectMuxChannel: invalid mux index");
             return ESP_ERR_INVALID_ARG;
         }
 
         // The channel for the mux is invalid
         if (targetSensor.muxChannel > UINT_MUX_LENGTH) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "selectMuxChannel: invalid mux channel");
             return ESP_ERR_INVALID_ARG;
         }
 
@@ -286,34 +321,43 @@ public:
 
     esp_err_t resetMuxes() {
         if (N == 0 || _gpioReset == GPIO_NUM_NC) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "resetMuxes: no mux or RESET GPIO");
             return ESP_ERR_INVALID_ARG;
         }
 
         LockGuard lock (this->_busMutex);
         if (lock.isMutexLocked()){
-            if (!this->confirmStatus(gpio_set_level(_gpioReset, 0))) {
+            if (!this->confirmStatus(gpio_set_level(_gpioReset, 0), "resetMuxes: set RESET low")) {
                 return _errorStatus;
             }
 
             esp_rom_delay_us(10);
 
-            if (!this->confirmStatus(gpio_set_level(_gpioReset, 1))) {
+            if (!this->confirmStatus(gpio_set_level(_gpioReset, 1), "resetMuxes: set RESET high")) {
                 return _errorStatus;
             }
 
             esp_rom_delay_us(10);
+        } else {
+            this->confirmStatus(ESP_ERR_INVALID_STATE, "resetMuxes: mutex lock not held");
+            return ESP_ERR_INVALID_STATE;
         }
-
         return ESP_OK;
     }
 
-    bool confirmStatus(esp_err_t status) {
-        // Check the status of the mux, and if it's not ESP_OK,
-        // change the bus's status.
+    bool confirmStatus(esp_err_t status, const char* location) {
+        // Report every failure, while retaining the first error in getStatus().
+        if (status != ESP_OK) {
+            // Print the Error in I2CBus, with location and status
 
-        if (status != ESP_OK && this->_errorStatus == ESP_OK) {
-            this->_errorStatus = status;
-            return false;
+            ESP_LOGE("I2CBus", "%s: %s",
+                    location,
+                    esp_err_to_name(status)
+            );
+
+            if (this->_errorStatus == ESP_OK) {
+                this->_errorStatus = status;
+            }
         }
 
         return status == ESP_OK;
@@ -323,38 +367,73 @@ public:
     esp_err_t getStatus() { return this->_errorStatus; }
 
     SemaphoreHandle_t& getMutex(){ return this->_busMutex; }
+
+    bool containsSensor(std::string_view name) {
+        return _registryMap.contains(std::string(name));
+    }
     
-    esp_err_t readRegister(const std::string_view name, const uint8_t regAddr, uint8_t *data, const size_t length) {
-        //Read the data within the register, returns an esp status of the optical
+    esp_err_t readRegister(const std::string_view name, const uint8_t regAddr, uint8_t *data, const size_t length, LockGuard& lock) {
+        //Read the data within the register, returns an esp status of the sensor
+        
+        // Check if the caller has a valid mutex
+        if (!lock.isMutexLocked()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "readRegister: bus lock not held");
+            return ESP_ERR_INVALID_ARG;
+        }
 
         // If the name of the sensor isn't in the registry, return the error
-        if (!this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
+        if (!this->_registryMap.contains(std::string(name))) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "readRegister: sensor not registered");
+            return ESP_ERR_INVALID_ARG;
+        }
         
         SensorRegistry existingRegistry = this->_registryMap.at(std::string(name));
 
         //Write, return the success
-        return i2c_master_transmit_receive(existingRegistry.sensorHandle, &regAddr, 1, data, length, 1000);
+        const esp_err_t status = i2c_master_transmit_receive(existingRegistry.sensorHandle, &regAddr, 1, data, length, 1000);
+        confirmStatus(status, "readRegister: sensor transmit/receive");
+        return status;
     }
 
-    esp_err_t writeRegister(const std::string_view name, uint8_t regAddr, uint8_t data) {
+    esp_err_t writeRegister(const std::string_view name, uint8_t regAddr, uint8_t data, LockGuard& lock) {
         //Write data at a specific register to the optical Sensor
 
+        // Check if the caller has a valid mutex
+        if (!lock.isMutexLocked()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "writeRegister: bus lock not held");
+            return ESP_ERR_INVALID_ARG;
+        }
+
         // If the name of the sensor isn't in the registry, return the error
-        if (!this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
+        if (!this->_registryMap.contains(std::string(name))) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "writeRegister: sensor not registered");
+            return ESP_ERR_INVALID_ARG;
+        }
 
         SensorRegistry existingRegistry = this->_registryMap.at(std::string(name));
 
         uint8_t writeBuffer[2] = {regAddr, data};
         
-        return i2c_master_transmit(existingRegistry.sensorHandle, writeBuffer, sizeof(writeBuffer), 1000);
+        const esp_err_t status = i2c_master_transmit(existingRegistry.sensorHandle, writeBuffer, sizeof(writeBuffer), 1000);
+        confirmStatus(status, "writeRegister: sensor transmit");
+        return status;
     }
 
     template<size_t S>
-    esp_err_t writeArrayRegister(const std::string_view name, const uint8_t regAddr, const uint8_t (&array)[S]) {
+    esp_err_t writeArrayRegister(const std::string_view name, const uint8_t regAddr, const uint8_t (&array)[S], LockGuard& lock) {
         // Write an array of any length to a target
 
+        // Check if the caller has a valid mutex
+        if (!lock.isMutexLocked()) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "writeArrayRegister: bus lock not held");
+            return ESP_ERR_INVALID_ARG;
+        }
+
         // If the name of the sensor isn't in the registry, return the error
-        if (!this->_registryMap.contains(std::string(name))) { return ESP_ERR_INVALID_ARG; }
+        if (!this->_registryMap.contains(std::string(name))) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "writeArrayRegister: sensor not registered");
+            return ESP_ERR_INVALID_ARG;
+        }
 
         SensorRegistry existingRegistry = this->_registryMap.at(std::string(name));
 
@@ -365,7 +444,9 @@ public:
         // Copy over the passed array
         std::memcpy(writeBuffer + 1, array, S);
 
-        return i2c_master_transmit(existingRegistry.sensorHandle, writeBuffer, sizeof(writeBuffer), 1000);
+        const esp_err_t status = i2c_master_transmit(existingRegistry.sensorHandle, writeBuffer, sizeof(writeBuffer), 1000);
+        confirmStatus(status, "writeArrayRegister: sensor transmit");
+        return status;
     }
 
 
@@ -375,16 +456,18 @@ private:
     // mask is the control byte: 0 disables all channels; 1u << channel selects one.
     esp_err_t setMux(size_t index, uint8_t mask) {
         if (index >= N) {
+            confirmStatus(ESP_ERR_INVALID_ARG, "setMux: invalid mux index");
             return ESP_ERR_INVALID_ARG;
         }
 
         const i2c_master_dev_handle_t muxHandle = _muxHandles[index];
         if (muxHandle == nullptr) {
+            confirmStatus(ESP_ERR_INVALID_STATE, "setMux: missing mux handle");
             return ESP_ERR_INVALID_STATE;
         }
 
         const esp_err_t status = i2c_master_transmit(muxHandle, &mask, 1, 1000);
-        confirmStatus(status);
+        confirmStatus(status, "setMux: mux control transmit");
         return status;
     }
 

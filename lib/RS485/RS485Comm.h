@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <optional>
 #include <string_view>
 #include <cstdio>
 #include <cinttypes>
@@ -13,54 +14,7 @@
 #include "RS485Utils.h"
 #include "RS485InterfaceSensor.h"
 
-// UART CONFIGURATIONS
-#define RS485_COMM_UART UART_NUM_1
-#ifndef UART_RTS_PIN
-#define UART_RTS_PIN    14      // TRANSMIT/RECIEVE ENABLE
-#endif
-#ifndef UART_TX_PIN
-#define UART_TX_PIN     17      // TRANSMIT PIN
-#endif
-#ifndef UART_RX_PIN
-#define UART_RX_PIN     18      // RECEIVE PIN
-#endif
-#define BAUD_RATE       115200  // BITS PER SECOND
-
-// COMM DEFAULT VALUES
-#define DEFAULT_COMM_PRIORITY           1
-#define DEFAULT_COMM_NAME               "RS485Comm"
-#define DEFAULT_COMM_TASK_STACK_SIZE    4096
-#define DEFAULT_COMM_TASK_CORE          1
-#define DEFAULT_COMM_RX_BUFF            128
-#define DEFAULT_MAX_PAYLOAD             128
-#define DEFAULT_MAX_LENGTH              121
-
-// BINARY HEADERS
-#define BINARY_COMM_READ            0b100000    // READING DATA
-#define BINARY_COMM_UPDATE          0b010000    // UPDATE VALUES
-#define BINARY_COMM_RESET_START     0b111111    // START RESET
-#define BINARY_COMM_RESET_CONT      0b111110    // CONTINUE RESET
-#define BINARY_COMM_RESET_END       0b101010    // END RESET
-#define BINARY_COMM_REBOOT          0b010101    // REBOOT ARSENAL
-#define BINARY_ESCAPE_SEQUENCE      0xDEADBEEF  // ESCAPE SEQUENCE
-
-// SIZE OF SECTIONS
-#define NON_LENGTH_BYTECOUNT                   3           // # OF BYTES BEFORE LENGTH
-#define PACKET_LENGTH_BYTECOUNT                4           // PACKET LENGTH BYTECOUNT
-#define SENSOR_TIME_SECTION_BYTECOUNT_SUM      4           // BYTECOUNT OF TWO TIME SECTIONS
-#define SENSOR_ID_SECTION_BYTECOUNT            8           // SENSOR ID BYTECOUNT
-#define ESCAPE_SEQUENCE_BYTECOUNT              4           // ESCAPE SEQUENCE BYTECOUNT
-
-// CONSISTENT FIRST INDICES PACKET SECTIONS
-#define INDEX_PACKET_LENGTH                 1           // PACKET LENGTH (Time, Time, ID, Data)
-#define INDEX_TIME_SINCE_LAST_RECEIVE       3           // TIME SINCE LAST RECEIVE
-#define INDEX_TIME_SENT                     7           // TIME OF SENDING
-#define INDEX_SENSOR_IDS                    11          // SENSOR IDs
-#define INDEX_SENSOR_DATA                   19          // SENSOR_DATA
-
-// MAX AND MIN FOR PACKET LENGTH
-#define PACKET_LENGTH_MIN           16      // MIN
-#define PACKET_LENGTH_MAX           113     // MAX
+#define RX_IDLE_THRESHOLD 4
 
 class RS485Comm{
 public:
@@ -69,14 +23,13 @@ public:
         : _txPin(txPin), _rxPin(rxPin), _enablePin(enablePin) {
         
         // Configuration object for uart_param_config
-        uart_config_t configUart = {
-            .baud_rate = BAUD_RATE,
-            .data_bits = UART_DATA_8_BITS,
-            .parity = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-            .source_clk = UART_SCLK_DEFAULT
-        };
+        uart_config_t configUart{};
+        configUart.baud_rate = BAUD_RATE;
+        configUart.data_bits = UART_DATA_8_BITS;
+        configUart.parity = UART_PARITY_DISABLE;
+        configUart.stop_bits = UART_STOP_BITS_1;
+        configUart.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+        configUart.source_clk = UART_SCLK_DEFAULT;
 
         // Run config with this comm as UART_NUM_1
         this->_status = uart_param_config(RS485_COMM_UART, &configUart);
@@ -98,12 +51,16 @@ public:
             RS485_COMM_UART,
             2048,
             0,
-            0,
-            nullptr,
+            16,             // Event queue consumed by the RS485 receive task
+            &_uartEvents,   // HANDLE FOR UART
             0
         );
 
         if (!checkCommStatus()) { return; }
+
+        this->_status = uart_set_rx_timeout(RS485_COMM_UART, RX_IDLE_THRESHOLD);
+        if (!checkCommStatus()) { return; }
+        uart_set_always_rx_timeout(RS485_COMM_UART, true);
 
         // Set the comm mode that the ESP32 is using
         this->_status = uart_set_mode(
@@ -194,7 +151,6 @@ public:
 
         printf("\n=== SERIAL STATUS ===\n");
         printf("_status: %s (%" PRId32 ")\n", esp_err_to_name(_status), static_cast<int32_t>(_status));
-        printf("_isFirstRead: %s\n", _isFirstRead ? "true" : "false");
         printf("_validPacket: %s\n", _validPacket ? "true" : "false");
         printf("_currentPacketState: %s (%d)\n", stateName, static_cast<int>(_currentPacketState));
         printf("_packetLength: %u body bytes\n", static_cast<unsigned int>(_packetLength));
@@ -221,6 +177,7 @@ private:
     const char* _name{DEFAULT_COMM_NAME};
     const uint8_t _priority{DEFAULT_COMM_PRIORITY};
     const uint8_t _core{DEFAULT_COMM_TASK_CORE};
+    QueueHandle_t _uartEvents{};
 
     //Registered sensors in the instance
     std::unordered_map<uint8_t, RS485InterfaceSensor*> _registryMap = {};
@@ -229,130 +186,65 @@ private:
     uint8_t _lastReadBytes[DEFAULT_COMM_RX_BUFF]{};
 
     // PACKET PARSING STATES, reset with resetParsing()
-    bool _isFirstRead{true};
     RS485Utils::ParseState _currentPacketState{RS485Utils::ParseState::WAITING_FOR_HEADER};
     size_t _currentPacketIndex{};
     uint16_t _dataLastIndex{};
     bool _validPacket{false};
+    bool _discardUntilIdle{false};
+    size_t _frameSize{};
 
     // PACKET DATA, persistent for a complete packet
     uint8_t _packet[DEFAULT_MAX_PAYLOAD]{};
+    uint8_t _packetHeader{};
     uint16_t _packetLength{};
     uint32_t _timeSinceLastReceive{};
     uint32_t _timeOfSending{};
     uint8_t _sensorIDS[2 * SENSOR_ID_SECTION_BYTECOUNT]{};
 
+    // SETUP HOLDER FOR RESET, nested array for double access, used only on a reset
+    uint8_t _currentOffsetSection{};
+    std::array<std::array<std::optional<Vec3<uint16_t>>, MAX_OFFSET_VECTOR_COUNT>, 16> _pendingOffsets{};
+
     uint64_t _receivedTime{};
 
     bool _serialMonitoring{false};
 
-    size_t compileSentPacket(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]){
-        packet[0] = (BINARY_COMM_READ << 2) | 0b0010;
+    // PARSER FUNCTIONS
+    bool validateRequestedSensorData(size_t bytesPerSlot) const {
+        const size_t bodyEnd = NON_LENGTH_BYTECOUNT + size_t(_packetLength);
+        const size_t slotCount = sizeof(_sensorIDS) / sizeof(_sensorIDS[0]);
 
-        //NOTE: We wait to add the length until the end with the full packet
-        
-        // TIME OF SENDING AND TIME SINCE RECEIVE
-        const uint32_t timeNow = esp_timer_get_time();
-
-        const uint32_t timeSinceReceive = static_cast<uint32_t>(timeNow - _receivedTime);
-        const uint32_t timeSending = static_cast<uint32_t>(timeNow);
-
-        RS485Utils::writeU32ToArr(packet, INDEX_TIME_SINCE_LAST_RECEIVE, timeSinceReceive);
-        RS485Utils::writeU32ToArr(packet, INDEX_TIME_SENT, timeSending);
-
-        // SENSOR IDS
-        // Sensor IDS will always be even since 2 * MAX_SENSOR IDS is always even
-        for (int i = 0; i < SENSOR_ID_SECTION_BYTECOUNT; i++) {
-            // Get even and odd id
-            uint8_t first = _registryMap.contains(_sensorIDS[2 * i]) ? _sensorIDS[2 * i] : 0;
-            uint8_t second = _registryMap.contains(_sensorIDS[2 * i + 1]) ? _sensorIDS[2 * i + 1] : 0;
-
-            // Place as a compacted byte at target index
-            packet[INDEX_SENSOR_IDS + i] = static_cast<uint8_t>((first << 4) | (second & 0xF));
-        }
-
-        // DATA
-        // The index we need will need to be reduced based on how many sensors we are sending.
-        // We include the data here.
-
-        // Loop invariant that controls the length based on the size
-        // (invariant += 6) each time we add data to the variable data section
-        uint8_t packetLengthInvariant{PACKET_LENGTH_MIN};
-
-        for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
-            // Each sensor portion uses 6 positions in the packet, so for each iteration
-            // (6 * i + INDEX_SENSOR_DATA) gives you the first position of where to place the first
-            // byte.
-
-            if (_sensorIDS[i] == 0) {
+        for (size_t slot = 0; slot < slotCount; ++slot) {
+            const uint8_t id = _sensorIDS[slot];
+            if (id == 0) {
                 continue;
             }
 
-            packetLengthInvariant = PACKET_LENGTH_MIN + 6 * (i + 1);
-
-            if(_registryMap.contains(_sensorIDS[i])) {
-                Vec3<uint16_t> reading = (_registryMap.at(_sensorIDS[i]))->getReadings();
-                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i, reading.x);
-                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 2, reading.y);
-                RS485Utils::writeU16ToArr(packet, INDEX_SENSOR_DATA + 6 * i + 4, reading.z);
-            } else {
-                
+            const size_t base = INDEX_SENSOR_DATA + 6 * slot;
+            // Validate against the body boundary, not the full backing buffer.
+            if (!_registryMap.contains(id) || base > bodyEnd ||
+                bytesPerSlot > bodyEnd - base) {
+                return false;
             }
         }
 
-        // LENGTH
-        // The invariant is now equal to the minimum length + our variable data
-        // We can now write the length in the packet
-        RS485Utils::writeU16ToArr(packet, INDEX_PACKET_LENGTH, packetLengthInvariant);
-        
-        // FIRST ESCAPE SEQUENCE
-        // Index found by taking the starting index where the length is measured, and adding the length invariant
-        // we found.
-        RS485Utils::writeU32ToArr(
-            packet,
-            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant,
-            BINARY_ESCAPE_SEQUENCE
-        );
-
-        // CHECKSUM
-        RS485Utils::writeU32ToArr(
-            packet,
-            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 4,
-            this->calculateChecksum(packet, packetLengthInvariant)
-        );
-
-        // SECOND ESCAPE SEQUENCE
-        RS485Utils::writeU32ToArr(
-            packet,
-            INDEX_TIME_SINCE_LAST_RECEIVE + packetLengthInvariant + 8,
-            BINARY_ESCAPE_SEQUENCE
-        );
-
-        // Return the size of the packet
-        return NON_LENGTH_BYTECOUNT + packetLengthInvariant + 3 * ESCAPE_SEQUENCE_BYTECOUNT;
+        return true;
     }
 
-    void sendData(){
-        // Send a responding data packet based on a validated packet received
-        // from the V5 
+    bool parseRead();
+    bool parseResetStart();
+    bool parseResetContinue();
+    bool parseResetEnd();
+    bool parseReboot();
+    bool parseFailure();
 
-        uint8_t sendingPacket[DEFAULT_MAX_PAYLOAD]{};
+    void addTimeData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    void addSensorIDs(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
+    void addPacketBacker(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], uint8_t length);
 
-        // Compile the packet, get its actual length, not sizeof(sendingPacket)
-        size_t packetSize = this->compileSentPacket(sendingPacket);
-
-        int bytesWritten = uart_write_bytes(
-            UART_NUM_1,
-            sendingPacket,
-            packetSize
-        );
-
-        if (bytesWritten != static_cast<int>(packetSize)) {
-            this->_status = ESP_ERR_INVALID_STATE;
-        }
-
-        return;
-    }
+    // PACKET COMPILER FUNCTIONS
+    size_t sendPkt(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD], const uint8_t packetHeader, const bool failure);
+    size_t compileReadData(uint8_t (&packet)[DEFAULT_MAX_PAYLOAD]);
 
     void calculateSensorIDs(){
         // For loop to add sensor IDs to the array field with the IDs
@@ -379,50 +271,35 @@ private:
         }
     }
 
-    bool extractData(){
-        // Extract data from our checked packet
+    bool handleResponse(const uint8_t type, const bool failed = false){
+        // Extract data from our checked packet and send a response
+        
+        //NOTE: Packet Header established in sendPkt when packet is passed its type
 
         // Time Data
         this->_timeSinceLastReceive = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SINCE_LAST_RECEIVE);
         this->_timeOfSending        = RS485Utils::convertU32InArr(_packet, INDEX_TIME_SENT);
         
-        this->calculateSensorIDs();
 
-        if (this->_isFirstRead) {
-            // Loop through the entire set of sensors
-            for (int i = 0; i < sizeof(_sensorIDS) / sizeof(_sensorIDS[0]); i++) {
-                // Check if the map contains the sensor ID
-                if (_registryMap.contains(_sensorIDS[i])) {
-                    //Add the offsets to a vector and pass it to set offsets
+        const RS485Utils::PacketType packetType = static_cast<RS485Utils::PacketType>(type);
 
-                    // Base index for each iteration
-                    const size_t base = INDEX_SENSOR_DATA + 6 * i;
-                    const size_t bodyEnd = INDEX_TIME_SINCE_LAST_RECEIVE + _packetLength;
+        if (failed || packetType == RS485Utils::PacketType::Failure){
+            // On either a read failure or a reset failure, set faulty ids
+            this->setFaultyIDS();
+        } else {
+            this->calculateSensorIDs();
+        }
 
-                    if (base + 6 > bodyEnd) {
-                        // Current offsets extend outside of slots
-                        return false;
-                    }
+        uint8_t packet[DEFAULT_MAX_PAYLOAD]{};
+        const size_t packetSize = sendPkt(packet, type, failed);
+        if (packetSize == 0) {
+            return false;
+        }
 
-                    // Write the offsets
-                    Vec3<uint16_t> offsets{
-                        RS485Utils::convertU16InArr(_packet, base),
-                        RS485Utils::convertU16InArr(_packet, base + 2),
-                        RS485Utils::convertU16InArr(_packet, base + 4)
-                    };
-
-                    // Set the offsets, record the result
-                    esp_err_t result = (_registryMap.at(_sensorIDS[i]))->setOffsets(offsets);
-
-                    if (result != ESP_OK) {
-                        // Throw an error, we could not set the offsets
-                        return false;
-                    }
-                }
-            }
-
-            // Finished the offset setting for the first read.
-            _isFirstRead = false;
+        const int bytesWritten = uart_write_bytes(RS485_COMM_UART, packet, packetSize);
+        if (bytesWritten != static_cast<int>(packetSize)) {
+            _status = ESP_ERR_INVALID_STATE;
+            return false;
         }
 
         return true;
@@ -465,21 +342,53 @@ private:
         _currentPacketIndex = 0;
         _currentPacketState = RS485Utils::ParseState::WAITING_FOR_HEADER;
         _dataLastIndex = 0;
+        _frameSize = 0;
+        _discardUntilIdle = false;
+    }
+
+    void setFailedPacketState() {
+        setFaultyIDS();
+
+    }
+
+    void setFaultyIDS() {
+        // Set IDS to 0xFF so that sensor read runs
+        const size_t IdSize = 2 * SENSOR_ID_SECTION_BYTECOUNT;
+
+        for (size_t i = 0; i < IdSize; i++) {
+            _sensorIDS[i] = 0xFF;
+        }
     }
 
     void parseByte(uint8_t byte){
+
+        if (_discardUntilIdle) {
+            return;
+        }
+
+        if (_currentPacketIndex >= sizeof(_packet)) {
+            _validPacket = false;
+            resetParsing();
+            return;
+        }
+
         switch (_currentPacketState)
         {
         case RS485Utils::ParseState::WAITING_FOR_HEADER:
-            if ((byte >> 2) == BINARY_COMM_READ) {
+
+            _validPacket = false;
+
+            if (RS485Utils::isValidHeader(byte >> 2)) {
                 this->_packet[_currentPacketIndex] = byte;
+                this->_packetHeader = byte >> 2;
 
                 this->_currentPacketIndex = 1; // Next _currentPacketIndex
                 _currentPacketState = RS485Utils::ParseState::LENGTH;
-                return; // This bit is done
             } else {
-                _validPacket = false;
+                _discardUntilIdle = true;
+                _packetHeader = static_cast<uint8_t>(RS485Utils::PacketType::Failure);
             }
+
             break;
         
         case RS485Utils::ParseState::LENGTH:
@@ -490,16 +399,18 @@ private:
                 // New packet length
                 _packetLength = static_cast<uint16_t>(_packet[1] << 8) |
                                 static_cast<uint16_t>(_packet[2]);
-                _dataLastIndex = NON_LENGTH_BYTECOUNT + _packetLength - 1;
 
-                if (this->invalidPacketLength()) {
-                    this->resetParsing();
-                    break;
-                } else {
-                    this->_currentPacketState = RS485Utils::ParseState::BODY;
-                    _currentPacketIndex++;
+                _dataLastIndex = NON_LENGTH_BYTECOUNT + _packetLength - 1;
+                _frameSize = NON_LENGTH_BYTECOUNT + size_t(_packetLength);
+                _frameSize += 3 * ESCAPE_SEQUENCE_BYTECOUNT;
+
+                if (_frameSize > sizeof(_packet) || invalidPacketLength()) {
+                    _validPacket = false;
+                    _discardUntilIdle = true;
                     break;
                 }
+
+                this->_currentPacketState = RS485Utils::ParseState::BODY;
             }
             
             // Increment the current packet index
@@ -510,13 +421,14 @@ private:
         case RS485Utils::ParseState::BODY:
             // Check if we are still within the index
             this->_packet[_currentPacketIndex] = byte;
-            if (_currentPacketIndex == (this->_dataLastIndex)) {
+            if (_currentPacketIndex >= (this->_dataLastIndex)) {
                 // This is the last bit, move on to the next part of the packet
                 this->_currentPacketState = RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE;
             }
             
             // Increment the index, the escape sequence is next
             _currentPacketIndex++;
+
             break;
         
         case RS485Utils::ParseState::FIRST_ESCAPE_SEQUENCE:
@@ -528,7 +440,8 @@ private:
                     this->_currentPacketState = RS485Utils::ParseState::CHECKSUM;
                     _currentPacketIndex++;
                 } else {
-                    this->resetParsing();
+                    _validPacket = false;
+                    _discardUntilIdle = true;
                 }
             } else {
                 _currentPacketIndex++;
@@ -548,7 +461,8 @@ private:
                     _currentPacketIndex++;
                 } else {
                     // The checksum failed, we need to reset for the next packet
-                    this->resetParsing();
+                    _validPacket = false;
+                    _discardUntilIdle = true;
                 }
             } else {
                 // Increment the index, not done with the checksum yet
@@ -559,19 +473,7 @@ private:
             this->_packet[_currentPacketIndex] = byte;
             if (_currentPacketIndex == _dataLastIndex + 12) {
                 
-                if (RS485Utils::convertU32InArr(this->_packet, _currentPacketIndex - 3) == BINARY_ESCAPE_SEQUENCE) {
-                    // Check the packet, starting from four bits back
-
-                    // Pull the data, packet will be valid if offsets can be written,
-                    // and data can be extracted
-                    _validPacket = this->extractData();
-
-                    if (_validPacket) { 
-                        _receivedTime = esp_timer_get_time();
-                    }
-                } else {
-                    _validPacket = false;
-                }
+                _validPacket = RS485Utils::convertU32InArr(this->_packet, _currentPacketIndex - 3) == BINARY_ESCAPE_SEQUENCE;
                 
                 // Reset the parser for a clean slate
                 this->resetParsing();
@@ -579,6 +481,7 @@ private:
                 // Not at the desired last index for the checksum, continue
                 _currentPacketIndex++;
             }
+            
             break;
         default:
             this->resetParsing();
@@ -588,28 +491,87 @@ private:
 
     void getBytesLoop() {
         for(;;) {
-            int received = uart_read_bytes(
-                RS485_COMM_UART,
-                this->_lastReadBytes,
-                sizeof(_lastReadBytes),
-                pdMS_TO_TICKS(100)
-            );
 
-            printf("UART received: %d\n", received);
-
-            if (received > 0) {
-                // UART read bytes, and we will parse them and send the requested data
-                for (int i = 0; i < received; i++) {
-                    this->parseByte(this->_lastReadBytes[i]);
-                    if (this->_validPacket) {
-                        this->_validPacket = false;
-                        this->sendData();
-                    }
-                }
+            uart_event_t uartEvent{};
+            if (xQueueReceive(_uartEvents, &uartEvent, portMAX_DELAY) != pdTRUE) {
+                continue;
             }
+            
+            if (uartEvent.type == UART_DATA) {
+                // This only triggers if we get data    
+                size_t remaining = uartEvent.size;
+                _receivedTime = esp_timer_get_time();
 
-            if (_serialMonitoring) {
-                this->serialStatus();
+                while (remaining > 0) {
+                    // The event reports buffered bytes; do not wait to fill the buffer.
+                    const size_t readSize = remaining < sizeof(_lastReadBytes)
+                        ? remaining : sizeof(_lastReadBytes);
+                    int received = uart_read_bytes(
+                        RS485_COMM_UART,
+                        this->_lastReadBytes,
+                        readSize,
+                        0
+                    );
+
+                    if (received <= 0) {
+                        _validPacket = false;
+                        _discardUntilIdle = true;
+                        break;
+                    }
+
+                    printf("UART received: %d\n", received);
+
+                    for (size_t i = 0; i < received; i++) {
+                        parseByte(_lastReadBytes[i]);
+                    }
+
+                    remaining -= static_cast<size_t>(received);
+                }
+
+                if (uartEvent.timeout_flag) {
+                    using PacketType = RS485Utils::PacketType;
+
+                    bool successful = false;
+
+                    if (_validPacket) {
+                        // Generic response for a valid packet,
+                        // returns true if it is correct
+                        successful = handleResponse(_packetHeader, false);
+                    }
+
+                    if(!successful) {
+                        // We had a catastrophic failure in one of the packet types, either by the sent packet,
+                        // or by the packet work by ARC.
+                        // We convert our previous header to an enum and handle it accordinly in the switch-case
+                        // set below
+                        const PacketType headerAsEnum = static_cast<PacketType>(_packetHeader);
+
+                        switch(headerAsEnum){
+                            case PacketType::ResetStart:
+                            case PacketType::ResetContinue:
+                            case PacketType::ResetEnd:
+                                // All resets are failures
+                                handleResponse(static_cast<uint8_t>(PacketType::Failure), false);
+                            break;
+                            case PacketType::Read:
+                                // Send as a failed read, we are already set up, the failure is in the readers
+                                handleResponse(_packetHeader, true);
+                            break;
+                            case PacketType::Reboot:
+                            case PacketType::Failure:
+                                // In the other cases, reset ourselves
+                                handleResponse(static_cast<uint8_t>(PacketType::Failure), false);
+                            break;
+                            default:
+                                // Edge-case handling in this case will use a failure
+                                handleResponse(static_cast<uint8_t>(PacketType::Failure), false);
+                            break;
+                        }
+                    }
+                    
+                    // Reset the parsing otherwise
+                    resetParsing();
+                }
             }
         }
     }
@@ -638,3 +600,6 @@ private:
        reinterpret_cast<RS485Comm*>(ptr)->getBytesLoop();
     }
 };
+
+#include "RS485CommParser.h"
+#include "RS485PacketComp.h"

@@ -10,6 +10,8 @@ idf_component_register(
         driver
         esp_driver_i2c
         esp_timer
+        esp_driver_sdspi
+        fatfs
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE

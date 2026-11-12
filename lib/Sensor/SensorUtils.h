@@ -5,6 +5,7 @@
 
 #include "esp_err.h"
 #include "Vec3.h"
+#include "LockGuard.h"
 
 
 // Forward declaration for Sensor<N>
@@ -22,7 +23,9 @@ namespace SensorUtils {
     //STRUCTURE OF A FUNCTION CALLBACK
     template <std::size_t N>
     using FunctionCallback = void(*)(Sensor<N>&);
-    using EspErrorCallback = esp_err_t(*)();
+    using EspErrorFunctionCallback = esp_err_t(*)();
+    template <std::size_t N>
+    using ReadFuncCallback = void(*)(Sensor<N>&, LockGuard&);
 
     typedef enum {
         SENSOR_OK = 0,            // Operation completed successfully.
@@ -41,23 +44,50 @@ namespace SensorUtils {
     } sensor_status_t;
 
     static inline const char *sensor_status_str(sensor_status_t s) {
-    switch (s) {
-        case SENSOR_OK:             return "ok";
-        case SENSOR_ERR_NOT_READY:  return "not_ready";
-        case SENSOR_ERR_IO:         return "io";
-        case SENSOR_ERR_TIMEOUT:    return "timeout";
-        case SENSOR_ERR_RANGE:      return "range";
-        case SENSOR_ERR_NO_READER:  return "no_reader";
-        case SENSOR_ERR_DISABLED:   return "disabled";
-        case SENSOR_ERR_FAULT:      return "fault";
-        case SENSOR_ERR_ARG:        return "bad_arg";
-        case SENSOR_ERR_NOT_FOUND:  return "not_found";
-        case SENSOR_ERR_FULL:       return "full";
-        case SENSOR_ERR_FUNC_CALL:  return "call_fail";
-        case SENSOR_ERR_TASK:       return "task_fail";
+        switch (s) {
+            case SENSOR_OK:             return "ok";
+            case SENSOR_ERR_NOT_READY:  return "not_ready";
+            case SENSOR_ERR_IO:         return "io";
+            case SENSOR_ERR_TIMEOUT:    return "timeout";
+            case SENSOR_ERR_RANGE:      return "range";
+            case SENSOR_ERR_NO_READER:  return "no_reader";
+            case SENSOR_ERR_DISABLED:   return "disabled";
+            case SENSOR_ERR_FAULT:      return "fault";
+            case SENSOR_ERR_ARG:        return "bad_arg";
+            case SENSOR_ERR_NOT_FOUND:  return "not_found";
+            case SENSOR_ERR_FULL:       return "full";
+            case SENSOR_ERR_FUNC_CALL:  return "call_fail";
+            case SENSOR_ERR_TASK:       return "task_fail";
+        }
+        return "?";  // Defensive fallback for an invalid/out-of-range enum value.
     }
-    return "?";  // Defensive fallback for an invalid/out-of-range enum value.
-}
+    enum FunctionReferences {
+        ON_SETUP,
+        ON_LOOP
+    };
+
+    enum SensorConfig {
+        NONE,
+        OPTICAL,
+        COLOR,
+        ENCODER,
+        TEMPERATURE
+    };
+
+    enum class PacketType : std::uint8_t {
+        Read = BINARY_COMM_READ,
+        ResetStart = BINARY_COMM_RESET_START,
+        ResetContinue = BINARY_COMM_RESET_CONT,
+        ResetEnd = BINARY_COMM_RESET_END,
+        Reboot = BINARY_COMM_REBOOT,
+        Failure = BINARY_COMM_FAILURE
+    };
+
+    enum class OffsetLayout {
+        REG_8_BIT,
+        REG_16_BIT_LOW_FIRST,
+        REG_16_BIT_HIGH_FIRST
+    };
 
     template <std::size_t N>
     struct AppendedMethod {
@@ -72,6 +102,19 @@ namespace SensorUtils {
         uint16_t variable;
 
         AppendedVariable(std::string_view name, uint16_t variable) : variableName(name), variable(variable){};
+    };
+    struct AppendedOffset {
+        std::string_view name;
+        uint16_t value;
+        uint8_t memoryRegistry;
+        uint8_t packetSection; // Index into the packet's offset vectors.
+        uint8_t component;     // 0 = x, 1 = y, 2 = z.
+        OffsetLayout layout;
+
+        AppendedOffset(std::string_view name, uint16_t value, uint8_t memoryRegistry,
+                       uint8_t packetSection, uint8_t component, OffsetLayout layout) :
+            name(name), value(value), memoryRegistry(memoryRegistry),
+            packetSection(packetSection), component(component), layout(layout) {}
     };
 
     inline void convertOffsetsToArr(
