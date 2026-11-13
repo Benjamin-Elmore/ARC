@@ -15,7 +15,7 @@
 #ifndef UART_RX_PIN
 #define UART_RX_PIN     18      // IC10 RO, pin 1
 #endif
-#define BAUD_RATE       115200  // BITS PER SECOND
+#define BAUD_RATE       500000  // BITS PER SECOND
 
 // COMM DEFAULT VALUES
 #define DEFAULT_COMM_PRIORITY           1
